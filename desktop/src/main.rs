@@ -1,7 +1,8 @@
 //! MIDI Spyglass: just the spyglass from FM-1 Mirror, for any MIDI keyboard or app. A round brass eyepiece
 //! that floats over everything and shows the last note or chord played on any MIDI input: its name, the
-//! notes on a grand staff with their waveform beside it, the pitch, how hard the key was hit, and the sound
-//! (the General MIDI name of the channel's Program Change, or the keyboard's name until one comes).
+//! notes on a grand staff with their waveform beside it (the synth's real sound from an audio input, the FM-1's
+//! by itself, or drawn from the notes), the pitch, how hard the key was hit, and the sound
+//! ("FM-1" while its sound is heard, else the General MIDI name of a Program Change).
 //!
 //! Drag it to move it; drag the grip on its rim, or scroll over it, to resize it; right-click it for the
 //! inputs it listens to, and to quit. Where it is and its size are remembered.
@@ -13,6 +14,7 @@ mod glass;
 mod glyphs;
 mod gm;
 mod midi;
+mod scope;
 mod staff;
 
 use std::path::PathBuf;
@@ -47,6 +49,11 @@ struct App {
     on_top: bool,
     wave: bool,
     sound: bool,
+    /// The audio input the waveform comes from: None, an FM-1's USB audio if one is plugged in; "" none (drawn
+    /// from the notes); else that input. And the one open now, by name.
+    audio: Option<String>,
+    listener: Option<(String, scope::Listener)>,
+    ring: Arc<Mutex<scope::Ring>>,
     dirty: bool,
     saved_at: Instant,
 }
@@ -67,13 +74,16 @@ impl App {
             on_top: saved["on_top"].as_bool().unwrap_or(true),
             wave: saved["wave"].as_bool().unwrap_or(true),
             sound: saved["sound"].as_bool().unwrap_or(true),
+            audio: saved["audio"].as_str().map(String::from),
+            listener: None,
+            ring: Arc::new(Mutex::new(scope::Ring::default())),
             dirty: false,
             saved_at: Instant::now(),
         }
     }
 
     fn store(&mut self) {
-        let mut s = json!({ "size": self.size, "on_top": self.on_top, "wave": self.wave, "sound": self.sound, "skip": self.inputs.skip.iter().collect::<Vec<_>>() });
+        let mut s = json!({ "size": self.size, "on_top": self.on_top, "wave": self.wave, "sound": self.sound, "audio": self.audio, "skip": self.inputs.skip.iter().collect::<Vec<_>>() });
         if let Some(at) = self.at {
             s["x"] = json!(at.x);
             s["y"] = json!(at.y);
@@ -95,6 +105,33 @@ impl App {
         self.looked = Some(Instant::now());
         let ctx = ctx.clone();
         self.inputs.refresh(&self.played, &move || ctx.request_repaint());
+        self.listen();
+    }
+
+    /// Opens the audio input the waveform comes from, or closes it: the one chosen, or an FM-1's when plugged in.
+    fn listen(&mut self) {
+        let want = if self.wave { scope::wanted(self.audio.as_deref()) } else { None };
+        let have = self.listener.as_ref().filter(|(_, l)| !l.dead()).map(|(n, _)| n.clone());
+        if want == have {
+            return;
+        }
+        self.listener = None;
+        if let Some(name) = want {
+            self.listener = scope::open(self.ring.clone(), &name).map(|l| (name, l));
+        }
+    }
+
+    /// The waveform: the real sound when an audio input is heard (a flat line while it's quiet), else drawn from
+    /// the notes. None: the waveform is off.
+    fn wave_now(&self) -> Option<Option<Vec<f32>>> {
+        if !self.wave {
+            return None;
+        }
+        let ring = self.ring.lock().unwrap();
+        if self.listener.is_some() && ring.listening() {
+            return Some(self.glass.hz().and_then(|hz| ring.wave(hz)));
+        }
+        Some(self.glass.drawn_wave())
     }
 
     /// The right-click menu: the inputs (untick one to stop listening to it), always on top, quit.
@@ -129,6 +166,30 @@ impl App {
         }
         if ui.checkbox(&mut self.wave, "Waveform").changed() {
             self.dirty = true;
+            self.looked = None;
+        }
+        if self.wave {
+            ui.menu_button("Waveform from", |ui| {
+                let heard = self.listener.as_ref().map(|(n, _)| n.clone());
+                let auto = match (&self.audio, &heard) {
+                    (None, Some(n)) => format!("FM-1's sound, when plugged in (now: {n})"),
+                    _ => "FM-1's sound, when plugged in".to_string(),
+                };
+                let mut pick = |ui: &mut egui::Ui, label: String, choice: Option<String>| {
+                    if ui.radio(self.audio == choice, label).clicked() {
+                        self.audio = choice;
+                        self.looked = None;
+                        self.dirty = true;
+                        ui.close_menu();
+                    }
+                };
+                pick(ui, auto, None);
+                pick(ui, "The notes (drawn, no audio)".to_string(), Some(String::new()));
+                ui.separator();
+                for name in scope::devices() {
+                    pick(ui, name.clone(), Some(name));
+                }
+            });
         }
         if ui.button("Quit MIDI Spyglass").clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -156,16 +217,25 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.look_for_inputs(ctx);
-        let (changed, sound) = {
+        self.inputs.greet();
+        let (changed, said, sound) = {
             let played = self.played.lock().unwrap();
-            (self.glass.tick(&played), if self.sound { played.sound() } else { None })
+            (self.glass.tick(&played), played.fm1_sound(), played.sound())
         };
+        // The header: the sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), else whose sound is heard ("FM-1",
+        // from its USB audio), else a Program Change's sound name.
+        let heard = self.listener.as_ref().filter(|_| self.ring.lock().unwrap().listening()).map(|(n, _)| scope::label(n));
+        let sound = if self.sound { said.or(heard).or(sound) } else { None };
         // Settling a chord or emptying the glass needs another look soon; otherwise a new message wakes it.
-        ctx.request_repaint_after(if self.glass.busy() || changed { Duration::from_millis(40) } else { LOOK_EVERY });
+        ctx.request_repaint_after(if self.glass.busy() || changed { Duration::from_millis(40) } else { Duration::from_millis(900) });
         let (at, scroll) = ctx.input(|i| (i.viewport().outer_rect.map(|r| r.min), i.smooth_scroll_delta.y));
         if at.is_some() && at != self.at {
             self.at = at;
             self.dirty = true;
+        }
+        let wave = self.wave_now();
+        if self.listener.is_some() && self.glass.hz().is_some() {
+            ctx.request_repaint_after(Duration::from_millis(40)); // the real sound keeps moving
         }
         let idle = if self.inputs.names().is_empty() { "no MIDI input" } else { "play a note" };
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
@@ -195,7 +265,7 @@ impl eframe::App for App {
             if grip.hovered() || grip.dragged() {
                 ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
             }
-            self.glass.draw(ui.painter(), c, d, idle, sound.as_deref(), self.wave);
+            self.glass.draw(ui.painter(), c, d, idle, sound.as_deref(), wave);
             if ui.rect_contains_pointer(area) || grip.dragged() {
                 glass::draw_grip(ui.painter(), grip_at, grip.hovered() || grip.dragged());
             }

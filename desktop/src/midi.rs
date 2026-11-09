@@ -1,13 +1,38 @@
 //! MIDI in: every input the system has, all at once, into one `Played` for the spyglass. Ports that
 //! come and go (a keyboard plugged in, a Bluetooth device connecting) are picked up on the next look.
-//! Nothing is ever sent anywhere: the spyglass only listens.
+//! The only thing ever sent is a hello to an FM-1 with Big Screen firmware, about once a second: that's what makes
+//! it send the name of the sound playing ("T1 FM6 PIANO 1"), as it does for FM-1 Mirror.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use midir::{Ignore, MidiInput, MidiInputConnection};
+use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 
 pub const CLIENT: &str = "MIDI Spyglass";
+
+/// An FM-1's MIDI port has one of these in its name (its firmware names it).
+const FM1_HINTS: [&str; 7] = ["fm-1", "fm1", "felucca", "melodee", "choralroot", "loom-8", "jiant"];
+/// The Big Screen hello (F0 7D 'F' 'S' 00 F7), and the sound playing it answers with: F0 7D 'F' 'S' 02, the name.
+const HELLO: [u8; 6] = [0xf0, 0x7d, b'F', b'S', 0, 0xf7];
+const SOUND: [u8; 5] = [0xf0, 0x7d, b'F', b'S', 2];
+const HELLO_EVERY: Duration = Duration::from_millis(900);
+/// The FM-1's sound name is old news this long after it last said it (it says it after every hello).
+const SOUND_STALE: Duration = Duration::from_secs(3);
+
+pub fn is_fm1(name: &str) -> bool {
+    let n = name.to_lowercase();
+    FM1_HINTS.iter().any(|h| n.contains(h))
+}
+
+/// The sound playing, if this message is an FM-1 saying it (an empty name: none).
+fn fm1_sound(m: &[u8]) -> Option<String> {
+    if m.len() < 6 || m[..5] != SOUND || m[m.len() - 1] != 0xf7 {
+        return None;
+    }
+    let name: String = m[5..m.len() - 1].iter().filter(|b| (0x20..0x7f).contains(*b)).map(|&b| b as char).collect();
+    Some(name.split_whitespace().collect::<Vec<_>>().join(" "))
+}
 
 /// What's been played: the last note and how hard, and the keys held now (for chord names); the sound each
 /// channel last picked (Program Change), and which input and channel the last note came from.
@@ -19,6 +44,8 @@ pub struct Played {
     program: std::collections::HashMap<String, [Option<u8>; 16]>,
     last_channel: u8,
     last_source: Option<String>,
+    /// What the FM-1 says it's playing, and when it said it.
+    fm1: Option<(String, Instant)>,
     pub last_note: Option<u8>,
     last_velocity: u8,
     first_velocity: Option<u8>,
@@ -28,7 +55,7 @@ pub struct Played {
 
 impl Default for Played {
     fn default() -> Played {
-        Played { down: [false; 128], vel: [0; 128], program: Default::default(), last_channel: 0, last_source: None, last_note: None, last_velocity: 0, first_velocity: None, velocity_varies: false, note_ons: 0 }
+        Played { down: [false; 128], vel: [0; 128], program: Default::default(), last_channel: 0, last_source: None, fm1: None, last_note: None, last_velocity: 0, first_velocity: None, velocity_varies: false, note_ons: 0 }
     }
 }
 
@@ -59,13 +86,15 @@ impl Played {
         }
     }
 
-    /// What's playing: the sound the last note's channel picked, if a Program Change said; else the input it came from.
+    /// The sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), while it keeps saying it.
+    pub fn fm1_sound(&self) -> Option<String> {
+        self.fm1.as_ref().filter(|(n, t)| !n.is_empty() && t.elapsed() < SOUND_STALE).map(|(n, _)| n.clone())
+    }
+
+    /// The sound the last note's channel picked on its input, if a Program Change said.
     pub fn sound(&self) -> Option<String> {
         let source = self.last_source.as_ref()?;
-        match self.program.get(source).and_then(|p| p[self.last_channel as usize]) {
-            Some(p) => Some(crate::gm::sound_name(self.last_channel, p)),
-            None => Some(source.clone()),
-        }
+        self.program.get(source).and_then(|p| p[self.last_channel as usize]).map(|p| crate::gm::sound_name(self.last_channel, p))
     }
 
     /// How hard the last key was hit; none until two different ones came (some keyboards always send the same).
@@ -133,6 +162,9 @@ pub fn ports() -> Vec<String> {
 pub struct Inputs {
     open: BTreeMap<String, MidiInputConnection<()>>,
     pub skip: BTreeSet<String>,
+    /// The FM-1 being said hello to, and when last.
+    hello: Option<(String, MidiOutputConnection)>,
+    hello_at: Option<Instant>,
 }
 
 impl Inputs {
@@ -150,6 +182,27 @@ impl Inputs {
         }
     }
 
+    /// Says hello to an FM-1 (one listened to), so its Big Screen firmware says the sound playing. Call often.
+    pub fn greet(&mut self) {
+        if self.hello_at.is_some_and(|t| t.elapsed() < HELLO_EVERY) {
+            return;
+        }
+        self.hello_at = Some(Instant::now());
+        let fm1 = self.open.keys().find(|n| is_fm1(n)).cloned();
+        if self.hello.as_ref().map(|(n, _)| n) != fm1.as_ref() {
+            self.hello = fm1.and_then(|name| {
+                let out = MidiOutput::new(CLIENT).ok()?;
+                let port = out.ports().into_iter().find(|p| out.port_name(p).is_ok_and(|n| n == name))?;
+                out.connect(&port, "MIDI Spyglass hello").ok().map(|c| (name, c))
+            });
+        }
+        if let Some((_, out)) = &mut self.hello {
+            if out.send(&HELLO).is_err() {
+                self.hello = None;
+            }
+        }
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.open.keys().cloned().collect()
     }
@@ -157,11 +210,18 @@ impl Inputs {
 
 fn connect(name: &str, played: Arc<Mutex<Played>>, on_note: impl Fn() + Send + 'static) -> Option<MidiInputConnection<()>> {
     let mut input = MidiInput::new(CLIENT).ok()?;
-    input.ignore(Ignore::All); // no SysEx, clock or active sensing: notes are all the spyglass reads
+    input.ignore(if is_fm1(name) { Ignore::TimeAndActiveSense } else { Ignore::All }); // an FM-1's SysEx: its sound's name
     let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n == name))?;
     let mut parser = Parser { source: name.to_string(), ..Default::default() };
     input
         .connect(&port, "MIDI Spyglass in", move |_, bytes, _| {
+            if bytes.first() == Some(&0xf0) {
+                if let Some(name) = fm1_sound(bytes) {
+                    played.lock().unwrap().fm1 = Some((name, Instant::now()));
+                    on_note();
+                }
+                return; // (its screen rows too: nothing for the spyglass)
+            }
             parser.feed(bytes, &mut played.lock().unwrap());
             on_note();
         }, ())
@@ -187,16 +247,26 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_fm1s_sound() {
+        let mut m = SOUND.to_vec();
+        m.extend(b"T1 FM6  PIANO 1");
+        m.push(0xf7);
+        assert_eq!(fm1_sound(&m).as_deref(), Some("T1 FM6 PIANO 1"));
+        assert!(fm1_sound(&HELLO).is_none());
+        assert!(is_fm1("Felucca") && is_fm1("Melodee FM-1") && !is_fm1("Keystation 49 MK3 (USB MIDI)"));
+    }
+
+    #[test]
     fn names_the_sound() {
         let (mut p, mut played) = (Parser { source: "Keystation 49".into(), ..Default::default() }, Played::default());
         p.feed(&[0x90, 60, 90], &mut played);
-        assert_eq!(played.sound().as_deref(), Some("Keystation 49"), "no Program Change yet: the input");
+        assert_eq!(played.sound(), None, "no Program Change yet");
         p.feed(&[0xC0, 4, 0x90, 62, 90], &mut played);
         assert_eq!(played.sound().as_deref(), Some("Electric Piano 1 · 5"));
         p.feed(&[0x99, 36, 100], &mut played);
-        assert_eq!(played.sound().as_deref(), Some("Keystation 49"), "channel 10 picked nothing");
+        assert_eq!(played.sound(), None, "channel 10 picked nothing");
         let mut other = Parser { source: "Other".into(), ..Default::default() };
         other.feed(&[0x90, 60, 90], &mut played);
-        assert_eq!(played.sound().as_deref(), Some("Other"), "another input's sound isn't this one's");
+        assert_eq!(played.sound(), None, "another input's sound isn't this one's");
     }
 }

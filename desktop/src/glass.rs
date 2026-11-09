@@ -16,10 +16,6 @@ const BRASS_DARK: Color32 = Color32::from_rgb(0x8a, 0x62, 0x24);
 const BRASS_SHADOW: Color32 = Color32::from_rgb(0x3e, 0x2a, 0x0e);
 const GLASS: Color32 = Color32::from_rgb(0x0e, 0x14, 0x1a);
 const TEXT: Color32 = Color32::WHITE;
-/// The sound's name on top: warm gold letters on smoked glass with a faint shine.
-const SOUND: Color32 = Color32::from_rgb(0xf7, 0xdc, 0x92);
-const SOUND_GLASS: Color32 = Color32::from_rgba_premultiplied(14, 11, 5, 225);
-const SOUND_SHINE: Color32 = Color32::from_rgba_premultiplied(10, 9, 6, 18);
 const WAVE: Color32 = Color32::from_rgb(80, 200, 255);
 const WAVE_QUIET: Color32 = Color32::from_rgb(110, 120, 130);
 
@@ -66,8 +62,9 @@ struct Voice {
 
 /// How long a note takes to fade from the waveform after its key comes up.
 const FADE: f64 = 0.6;
-/// How fast the waveform drifts, in periods of its lowest note a second: it runs like a scope's.
-const DRIFT: f64 = 0.9;
+/// How much of the sound the waveform shows, as MIDI Bridge's spyglass does: the same for every note, so a note an
+/// octave up shows twice as many waves.
+const WINDOW: f64 = 0.02;
 
 /// How long a note or chord stays after the last key comes up, then the glass is empty again.
 const HOLD: f64 = 3.0;
@@ -116,6 +113,18 @@ impl Glass {
         self.armed || self.released.is_some() || !self.sounding.is_empty()
     }
 
+    /// The note a real sound's wave is lined up on: the lowest sounding, else the one showing.
+    pub fn hz(&self) -> Option<f64> {
+        if let Some(n) = self.sounding.iter().map(|v| v.note).min() {
+            return Some(note_hz(n));
+        }
+        match &self.shown {
+            Some(Shown::Note(n, _)) => Some(note_hz(*n)),
+            Some(Shown::Chord { keys, .. }) => keys.first().map(|&n| note_hz(n)),
+            None => None,
+        }
+    }
+
     /// Keeps the waveform's notes up with the keys: new ones join at their loudness, released ones fade out.
     fn follow(&mut self, held: Vec<(u8, u8)>) -> bool {
         let now = Instant::now();
@@ -144,54 +153,32 @@ impl Glass {
         !self.sounding.is_empty()
     }
 
-    /// The waveform now: each sounding note at its loudness (fading after release), drifting with time.
-    fn live_wave(&self) -> Option<Vec<f32>> {
-        let t = self.started?.elapsed().as_secs_f64();
+    /// The waveform drawn from the notes now: each sounding note at its loudness (fading after release).
+    pub fn drawn_wave(&self) -> Option<Vec<f32>> {
+        self.started?;
         let notes: Vec<(u8, f32)> = self
             .sounding
             .iter()
             .map(|v| (v.note, v.level * v.up.map_or(1.0, |u| (1.0 - u.elapsed().as_secs_f64() / FADE).max(0.0) as f32)))
             .collect();
-        waveform(&notes, t * DRIFT)
+        waveform(&notes)
     }
 
     /// The eyepiece centred on `c`, `d` across. `idle`: what it says while nothing has been played.
-    /// `sound`: what's playing, across the top. `wave`: the waveform beside the staff.
-    pub fn draw(&self, p: &Painter, c: Pos2, d: f32, idle: &str, sound: Option<&str>, wave: bool) {
+    /// `sound`: what's playing, across the top. `wave`: the waveform beside the staff (`Some(None)`: a flat line).
+    pub fn draw(&self, p: &Painter, c: Pos2, d: f32, idle: &str, sound: Option<&str>, wave: Option<Option<Vec<f32>>>) {
+        let shape = wave.clone().flatten();
+        let wave = wave.is_some();
         lens(p, c, d / 2.0, d);
         if let Some(sound) = sound {
-            // The sound's name across the top of the glass: warm gold letters, a little spaced, on a rounded band of
-            // dark smoked glass with a thin brass edge (the rim's), a soft highlight on its upper half.
-            let room = d * 0.5;
-            let job = |size: f32, color: Color32| {
-                let mut j = egui::text::LayoutJob::default();
-                j.append(&format!("\u{266a}  {sound}"), 0.0, egui::TextFormat {
-                    font_id: FontId::proportional(size),
-                    color,
-                    extra_letter_spacing: size * 0.06,
-                    ..Default::default()
-                });
-                j
-            };
-            let mut size = (d * 0.06).max(12.0);
-            let w = p.fonts(|f| f.layout_job(job(size, SOUND))).size().x;
-            if w > room {
-                size *= room / w;
+            // What's sounding, small in brass near the top of the glass, as MIDI Bridge's spyglass says "♪ FM-1".
+            let text = format!("\u{266a} {sound}");
+            let size = d * 0.045;
+            let mut g = p.layout_no_wrap(text.clone(), FontId::proportional(size), BRASS_LIGHT);
+            if g.size().x > d * 0.42 {
+                g = p.layout_no_wrap(text, FontId::proportional(size * d * 0.42 / g.size().x), BRASS_LIGHT);
             }
-            let g = p.fonts(|f| f.layout_job(job(size, SOUND)));
-            let at = c + vec2(0.0, -d * 0.325);
-            let band = Rect::from_center_size(at, vec2(g.size().x + size * 1.4, g.size().y + size * 0.5));
-            let round = CornerRadius::same((band.height() / 2.0).min(255.0) as u8);
-            p.rect_filled(band.translate(vec2(0.0, 2.0)), round, Color32::from_black_alpha(90));   // its shadow
-            p.rect_filled(band, round, SOUND_GLASS);
-            let upper = Rect::from_min_max(band.min + vec2(2.0, 2.0), Pos2::new(band.max.x - 2.0, band.center().y));
-            p.rect_filled(upper, CornerRadius::same(((upper.height()).min(255.0)) as u8), SOUND_SHINE);
-            p.rect_stroke(band, round, Stroke::new(1.25_f32, BRASS_LIGHT), egui::StrokeKind::Inside);
-            p.rect_stroke(band.shrink(1.25), round, Stroke::new(1.0_f32, Color32::from_black_alpha(140)), egui::StrokeKind::Inside);
-            let top_left = at - g.size() / 2.0;
-            p.galley(top_left + vec2(0.0, 1.0), p.fonts(|f| f.layout_job(job(size, Color32::from_black_alpha(200)))), Color32::BLACK);
-            p.galley(top_left + vec2(0.45, 0.0), g.clone(), SOUND);    // (twice, a hair apart: a touch bolder)
-            p.galley(top_left, g, SOUND);
+            p.galley(c + vec2(0.0, -d * 0.345) - g.size() / 2.0, g, BRASS_LIGHT);
         }
         let fit = |text: String, size: f32, room: f32| {
             let g = p.layout_no_wrap(text.clone(), FontId::proportional(size), TEXT);
@@ -222,7 +209,7 @@ impl Glass {
             // The notes' waveform, right of the staff; a flat grey line while nothing is showing.
             let r = Rect::from_min_max(c + vec2(d * 0.075, -d * 0.02), c + vec2(d * 0.355, d * 0.19));
             let width = (d * 0.006).max(2.0);
-            match self.live_wave() {
+            match shape {
                 Some(w) => {
                     let at = |i: usize, s: f32| Pos2::new(r.left() + r.width() * i as f32 / (w.len() - 1) as f32, r.center().y - s * r.height() / 2.0);
                     let line = w.iter().enumerate().map(|(i, &s)| at(i, s)).collect();
@@ -243,24 +230,22 @@ impl Glass {
     }
 }
 
-/// How many points the waveform is drawn with.
-const WAVE_POINTS: usize = 240;
+/// How many points the waveform is drawn with (48 kHz over WINDOW, like a real sound's).
+const WAVE_POINTS: usize = 960;
 
 /// The notes' sound as a scope would show it, made from MIDI alone: a sine at each note's pitch and loudness
-/// (0-1), added up (a chord's beating shape), over four periods of the lowest note, `drift` periods along.
-/// ±1 is everything at full loudness in step; none when nothing sounds.
-pub fn waveform(notes: &[(u8, f32)], drift: f64) -> Option<Vec<f32>> {
-    let low = note_hz(notes.iter().map(|&(n, _)| n).min()?);
+/// (0-1), added up (a chord's beating shape), over WINDOW, from zero going up like a triggered scope's: it stands
+/// still. ±1 is everything at full loudness in step; none when nothing sounds.
+pub fn waveform(notes: &[(u8, f32)]) -> Option<Vec<f32>> {
     let total: f32 = notes.iter().map(|&(_, a)| a).sum();
-    if total <= 0.001 {
+    if notes.is_empty() || total <= 0.001 {
         return None;
     }
     let loudest = notes.iter().fold(0.0f32, |m, &(_, a)| m.max(a));
-    let (span, from) = (4.0 / low, drift / low);
     Some(
         (0..WAVE_POINTS)
             .map(|i| {
-                let t = from + span * i as f64 / (WAVE_POINTS - 1) as f64;
+                let t = WINDOW * i as f64 / (WAVE_POINTS - 1) as f64;
                 let s: f64 = notes.iter().map(|&(n, a)| a as f64 * (std::f64::consts::TAU * note_hz(n) * t).sin()).sum();
                 (s as f32 / total) * loudest // the chord's shape, as tall as its loudest note
             })
@@ -305,18 +290,19 @@ mod wave_tests {
     use super::*;
 
     #[test]
-    fn follows_how_hard_and_moves() {
-        let w = waveform(&[(69, 1.0)], 0.0).unwrap(); // A4, hit hard
+    fn follows_how_hard_and_shows_twenty_ms() {
+        let w = waveform(&[(69, 1.0)]).unwrap(); // A4 (440 Hz): 8.8 waves in 20 ms
         assert_eq!(w.len(), WAVE_POINTS);
-        assert!(w[0].abs() < 1e-6, "starts at zero");
+        assert!(w[0].abs() < 1e-6 && w[1] > 0.0, "starts at zero going up");
         assert!((w.iter().cloned().fold(f32::MIN, f32::max) - 1.0).abs() < 1e-3);
-        let soft = waveform(&[(69, 0.3)], 0.0).unwrap();
+        let ups = w.windows(2).filter(|p| p[0] < 0.0 && p[1] >= 0.0).count();
+        assert_eq!(ups, 8);
+        let soft = waveform(&[(69, 0.3)]).unwrap();
         assert!((soft.iter().cloned().fold(f32::MIN, f32::max) - 0.3).abs() < 1e-3, "a soft note is lower");
-        let later = waveform(&[(69, 1.0)], 0.25).unwrap();
-        assert!((later[0] - 1.0).abs() < 1e-3, "a quarter period on, it starts at the top");
-        assert!(waveform(&[], 0.0).is_none() && waveform(&[(60, 0.0)], 0.0).is_none());
-        assert!(waveform(&[(60, 0.8), (64, 0.5), (67, 1.0)], 0.3).unwrap().iter().all(|s| s.abs() <= 1.0));
+        assert!(waveform(&[]).is_none() && waveform(&[(60, 0.0)]).is_none());
+        assert!(waveform(&[(60, 0.8), (64, 0.5), (67, 1.0)]).unwrap().iter().all(|s| s.abs() <= 1.0));
     }
+
 }
 
 #[cfg(test)]

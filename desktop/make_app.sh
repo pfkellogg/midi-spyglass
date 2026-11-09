@@ -30,6 +30,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VER</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>The waveform shows your synth's real sound from an audio input (the FM-1's own USB audio when it is plugged in). MIDI Spyglass only draws it; nothing is recorded or sent.</string>
 </dict>
 </plist>
 PLIST

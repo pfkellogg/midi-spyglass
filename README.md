@@ -5,14 +5,16 @@ app. A round brass eyepiece floats over everything and shows what you play:
 
 - the **note** or **chord** name (C major, Cmaj7, …), big
 - the notes on a **grand staff**
-- a live **waveform** of the notes, beside the staff: it runs while you hold keys, is as tall as you hit them,
-  and fades when you let go
+- a **waveform** beside the staff: the synth's real sound, standing still like an oscilloscope's (the FM-1's USB
+  audio by itself, or any audio input from the menu), else drawn from the notes you hold
 - the full name, the pitch in Hz, and **how hard** the key was hit
-- the **sound**, across the top: the General MIDI name of the last Program Change on that input and channel
-  (for example *Electric Piano 1 · 5*), or the keyboard's name until one comes
+- the **sound**, across the top: on an FM-1 with Big Screen firmware, the sound it's playing (*T1 FM6 PIANO 1*);
+  else *FM-1* while its sound is heard; else the General MIDI name of the last Program Change on that input and
+  channel (for example *Electric Piano 1 · 5*)
 
 No FM-1 needed. It listens to **every MIDI input** the computer or tablet has, all at once, and picks up a keyboard
-the moment it's plugged in. It only listens: it never sends anything.
+the moment it's plugged in. It only listens, except for a hello once a second to an FM-1, which makes the FM-1's
+Big Screen firmware say the name of its sound.
 
 ![MIDI Spyglass showing C major](docs/spyglass.png)
 
@@ -32,7 +34,7 @@ Mac, Windows, Linux and Android: see [Releases](../../releases).
 **Mac, Windows, Linux**
 - **Drag** the spyglass to move it.
 - **Resize** it with the brass grip on its rim (bottom right), or scroll over it.
-- **Right-click** it for the MIDI inputs it listens to (untick one to ignore it), *Sound name*, *Waveform*,
+- **Right-click** it for the MIDI inputs it listens to (untick one to ignore it), *Sound name*, *Waveform*, *Waveform from*,
   *Always on top*, and *Quit*.
 
 **Android**
@@ -49,9 +51,9 @@ MIDI carries notes, not sound. So:
 - The **sound name** comes from Program Change messages. Its General MIDI name is right for General MIDI
   synths and apps; other synths number their sounds their own way, so the number after the name is the one to
   trust there.
-- The **waveform** is drawn from the notes themselves: a sine at each held note's pitch and loudness, added up,
-  so one note is a clean wave and a chord shows its combined shape, moving like a scope's. It isn't your synth's
-  actual sound.
+- The **waveform** is your synth's real sound when it comes in on an audio input: the FM-1's USB audio is picked
+  by itself, and *Waveform from* in the menu picks another (on a Mac, allow the microphone once: any audio input
+  counts as one). Without one it's drawn from the notes: a sine at each held note's pitch and loudness, added up.
 
 ## Building
 
