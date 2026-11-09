@@ -16,6 +16,10 @@ const BRASS_DARK: Color32 = Color32::from_rgb(0x8a, 0x62, 0x24);
 const BRASS_SHADOW: Color32 = Color32::from_rgb(0x3e, 0x2a, 0x0e);
 const GLASS: Color32 = Color32::from_rgb(0x0e, 0x14, 0x1a);
 const TEXT: Color32 = Color32::WHITE;
+/// The sound's name on top: warm gold letters on smoked glass with a faint shine, in a brass-edged band.
+const SOUND: Color32 = Color32::from_rgb(0xf7, 0xdc, 0x92);
+const SOUND_GLASS: Color32 = Color32::from_rgba_premultiplied(14, 11, 5, 225);
+const SOUND_SHINE: Color32 = Color32::from_rgba_premultiplied(10, 9, 6, 18);
 const WAVE: Color32 = Color32::from_rgb(80, 200, 255);
 const WAVE_QUIET: Color32 = Color32::from_rgb(110, 120, 130);
 
@@ -171,14 +175,38 @@ impl Glass {
         let wave = wave.is_some();
         lens(p, c, d / 2.0, d);
         if let Some(sound) = sound {
-            // What's sounding, small in brass near the top of the glass, as MIDI Bridge's spyglass says "♪ FM-1".
-            let text = format!("\u{266a} {sound}");
-            let size = d * 0.045;
-            let mut g = p.layout_no_wrap(text.clone(), FontId::proportional(size), BRASS_LIGHT);
-            if g.size().x > d * 0.42 {
-                g = p.layout_no_wrap(text, FontId::proportional(size * d * 0.42 / g.size().x), BRASS_LIGHT);
+            // The sound's name across the top of the glass: warm gold letters, a little spaced, on a rounded band of
+            // dark smoked glass with a thin brass edge (the rim's), a soft highlight on its upper half.
+            let room = d * 0.5;
+            let job = |size: f32, color: Color32| {
+                let mut j = egui::text::LayoutJob::default();
+                j.append(&format!("\u{266a}  {sound}"), 0.0, egui::TextFormat {
+                    font_id: FontId::proportional(size),
+                    color,
+                    extra_letter_spacing: size * 0.06,
+                    ..Default::default()
+                });
+                j
+            };
+            let mut size = (d * 0.06).max(12.0);
+            let w = p.fonts(|f| f.layout_job(job(size, SOUND))).size().x;
+            if w > room {
+                size *= room / w;
             }
-            p.galley(c + vec2(0.0, -d * 0.345) - g.size() / 2.0, g, BRASS_LIGHT);
+            let g = p.fonts(|f| f.layout_job(job(size, SOUND)));
+            let at = c + vec2(0.0, -d * 0.325);
+            let band = Rect::from_center_size(at, vec2(g.size().x + size * 1.4, g.size().y + size * 0.5));
+            let round = CornerRadius::same((band.height() / 2.0).min(255.0) as u8);
+            p.rect_filled(band.translate(vec2(0.0, 2.0)), round, Color32::from_black_alpha(90));   // its shadow
+            p.rect_filled(band, round, SOUND_GLASS);
+            let upper = Rect::from_min_max(band.min + vec2(2.0, 2.0), Pos2::new(band.max.x - 2.0, band.center().y));
+            p.rect_filled(upper, CornerRadius::same(((upper.height()).min(255.0)) as u8), SOUND_SHINE);
+            p.rect_stroke(band, round, Stroke::new(1.25_f32, BRASS_LIGHT), egui::StrokeKind::Inside);
+            p.rect_stroke(band.shrink(1.25), round, Stroke::new(1.0_f32, Color32::from_black_alpha(140)), egui::StrokeKind::Inside);
+            let top_left = at - g.size() / 2.0;
+            p.galley(top_left + vec2(0.0, 1.0), p.fonts(|f| f.layout_job(job(size, Color32::from_black_alpha(200)))), Color32::BLACK);
+            p.galley(top_left + vec2(0.45, 0.0), g.clone(), SOUND);    // (twice, a hair apart: a touch bolder)
+            p.galley(top_left, g, SOUND);
         }
         let fit = |text: String, size: f32, room: f32| {
             let g = p.layout_no_wrap(text.clone(), FontId::proportional(size), TEXT);
