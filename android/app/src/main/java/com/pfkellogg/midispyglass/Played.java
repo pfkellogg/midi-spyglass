@@ -8,6 +8,7 @@ import java.util.Arrays;
  */
 final class Played {
     private final boolean[] down = new boolean[128];
+    private final int[] vel = new int[128];
     private int lastNote = -1, lastVelocity, firstVelocity = -1;
     private boolean velocityVaries;
     private long noteOns;
@@ -69,6 +70,7 @@ final class Played {
     private void event(int type, int note, int value) {
         if (type == 0x90 && value > 0) {
             down[note] = true;
+            vel[note] = value;
             lastNote = note;
             lastVelocity = value;
             if (firstVelocity < 0) firstVelocity = value;
@@ -94,6 +96,16 @@ final class Played {
 
     /** How hard the last key was hit; -1 until the keyboard has sent two different ones (some always send the same). */
     synchronized int velocity() { return velocityVaries ? lastVelocity : -1; }
+
+    /** The keys held now and how hard each was hit (0-1; 100/127 from a keyboard that doesn't send it), as {note, level} pairs. */
+    synchronized float[][] held() {
+        int n = 0;
+        for (boolean d : down) if (d) n++;
+        float[][] h = new float[n][];
+        n = 0;
+        for (int i = 0; i < 128; i++) if (down[i]) h[n++] = new float[] {i, (velocityVaries ? vel[i] : 100) / 127f};
+        return h;
+    }
 
     synchronized int[] keysDown() {
         int n = 0;

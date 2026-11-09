@@ -13,6 +13,8 @@ pub const CLIENT: &str = "MIDI Spyglass";
 /// channel last picked (Program Change), and which input and channel the last note came from.
 pub struct Played {
     down: [bool; 128],
+    /// How hard each held key was hit.
+    vel: [u8; 128],
     /// The sound each input's channel last picked, by input name.
     program: std::collections::HashMap<String, [Option<u8>; 16]>,
     last_channel: u8,
@@ -26,7 +28,7 @@ pub struct Played {
 
 impl Default for Played {
     fn default() -> Played {
-        Played { down: [false; 128], program: Default::default(), last_channel: 0, last_source: None, last_note: None, last_velocity: 0, first_velocity: None, velocity_varies: false, note_ons: 0 }
+        Played { down: [false; 128], vel: [0; 128], program: Default::default(), last_channel: 0, last_source: None, last_note: None, last_velocity: 0, first_velocity: None, velocity_varies: false, note_ons: 0 }
     }
 }
 
@@ -41,6 +43,7 @@ impl Played {
                     self.last_source = Some(source.to_string());
                 }
                 self.down[note as usize] = true;
+                self.vel[note as usize] = value;
                 self.last_note = Some(note);
                 self.last_velocity = value;
                 match self.first_velocity {
@@ -68,6 +71,11 @@ impl Played {
     /// How hard the last key was hit; none until two different ones came (some keyboards always send the same).
     pub fn velocity(&self) -> Option<u8> {
         self.velocity_varies.then_some(self.last_velocity)
+    }
+
+    /// The keys held now and how hard each was hit (all the same, 100, from a keyboard that doesn't send it).
+    pub fn held(&self) -> Vec<(u8, u8)> {
+        (0..128u8).filter(|&n| self.down[n as usize]).map(|n| (n, if self.velocity_varies { self.vel[n as usize] } else { 100 })).collect()
     }
 
     pub fn keys_down(&self) -> Vec<u8> {

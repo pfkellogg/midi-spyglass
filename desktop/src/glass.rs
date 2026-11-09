@@ -52,7 +52,22 @@ pub struct Glass {
     settling: Vec<u8>,
     since: Option<Instant>,
     released: Option<Instant>,
+    /// The live waveform: the notes sounding (held, or fading after release) and how loud each is.
+    sounding: Vec<Voice>,
+    started: Option<Instant>,
 }
+
+/// A note in the waveform: its loudness from how hard it was hit, and when its key came up (it fades then).
+struct Voice {
+    note: u8,
+    level: f32,
+    up: Option<Instant>,
+}
+
+/// How long a note takes to fade from the waveform after its key comes up.
+const FADE: f64 = 0.6;
+/// How fast the waveform drifts, in periods of its lowest note a second: it runs like a scope's.
+const DRIFT: f64 = 0.9;
 
 /// How long a note or chord stays after the last key comes up, then the glass is empty again.
 const HOLD: f64 = 3.0;
@@ -60,7 +75,7 @@ const HOLD: f64 = 3.0;
 impl Glass {
     /// True when there's something new to draw.
     pub fn tick(&mut self, played: &Played) -> bool {
-        let mut changed = false;
+        let mut changed = self.follow(played.held());
         if played.note_ons != self.seen {
             self.seen = played.note_ons;
             if let Some(n) = played.last_note {
@@ -98,7 +113,46 @@ impl Glass {
 
     /// Still settling a chord, or waiting to empty the glass: draw again soon.
     pub fn busy(&self) -> bool {
-        self.armed || self.released.is_some()
+        self.armed || self.released.is_some() || !self.sounding.is_empty()
+    }
+
+    /// Keeps the waveform's notes up with the keys: new ones join at their loudness, released ones fade out.
+    fn follow(&mut self, held: Vec<(u8, u8)>) -> bool {
+        let now = Instant::now();
+        for v in &mut self.sounding {
+            match held.iter().find(|(n, _)| *n == v.note) {
+                Some(&(_, vel)) => {
+                    v.up = None;
+                    v.level = vel as f32 / 127.0;
+                }
+                None => {
+                    v.up.get_or_insert(now);
+                }
+            }
+        }
+        for &(n, vel) in &held {
+            if !self.sounding.iter().any(|v| v.note == n) {
+                self.sounding.push(Voice { note: n, level: vel as f32 / 127.0, up: None });
+            }
+        }
+        self.sounding.retain(|v| v.up.is_none_or(|t| t.elapsed().as_secs_f64() < FADE));
+        if self.sounding.is_empty() {
+            self.started = None;
+        } else {
+            self.started.get_or_insert(now);
+        }
+        !self.sounding.is_empty()
+    }
+
+    /// The waveform now: each sounding note at its loudness (fading after release), drifting with time.
+    fn live_wave(&self) -> Option<Vec<f32>> {
+        let t = self.started?.elapsed().as_secs_f64();
+        let notes: Vec<(u8, f32)> = self
+            .sounding
+            .iter()
+            .map(|v| (v.note, v.level * v.up.map_or(1.0, |u| (1.0 - u.elapsed().as_secs_f64() / FADE).max(0.0) as f32)))
+            .collect();
+        waveform(&notes, t * DRIFT)
     }
 
     /// The eyepiece centred on `c`, `d` across. `idle`: what it says while nothing has been played.
@@ -168,7 +222,7 @@ impl Glass {
             // The notes' waveform, right of the staff; a flat grey line while nothing is showing.
             let r = Rect::from_min_max(c + vec2(d * 0.075, -d * 0.02), c + vec2(d * 0.355, d * 0.19));
             let width = (d * 0.006).max(2.0);
-            match waveform(&keys) {
+            match self.live_wave() {
                 Some(w) => {
                     let at = |i: usize, s: f32| Pos2::new(r.left() + r.width() * i as f32 / (w.len() - 1) as f32, r.center().y - s * r.height() / 2.0);
                     let line = w.iter().enumerate().map(|(i, &s)| at(i, s)).collect();
@@ -192,20 +246,26 @@ impl Glass {
 /// How many points the waveform is drawn with.
 const WAVE_POINTS: usize = 240;
 
-/// The notes' sound as a scope would show it, made from MIDI alone: a sine at each note's pitch, added up (a
-/// chord's beating shape), over four periods of the lowest note, starting at zero going up. Scaled so the
-/// highest point is ±1; none for no notes.
-pub fn waveform(keys: &[u8]) -> Option<Vec<f32>> {
-    let low = note_hz(*keys.iter().min()?);
-    let span = 4.0 / low;
-    let w: Vec<f32> = (0..WAVE_POINTS)
-        .map(|i| {
-            let t = span * i as f64 / (WAVE_POINTS - 1) as f64;
-            keys.iter().map(|&n| (std::f64::consts::TAU * note_hz(n) * t).sin()).sum::<f64>() as f32
-        })
-        .collect();
-    let peak = w.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    (peak > 0.0).then(|| w.iter().map(|s| s / peak).collect())
+/// The notes' sound as a scope would show it, made from MIDI alone: a sine at each note's pitch and loudness
+/// (0-1), added up (a chord's beating shape), over four periods of the lowest note, `drift` periods along.
+/// ±1 is everything at full loudness in step; none when nothing sounds.
+pub fn waveform(notes: &[(u8, f32)], drift: f64) -> Option<Vec<f32>> {
+    let low = note_hz(notes.iter().map(|&(n, _)| n).min()?);
+    let total: f32 = notes.iter().map(|&(_, a)| a).sum();
+    if total <= 0.001 {
+        return None;
+    }
+    let loudest = notes.iter().fold(0.0f32, |m, &(_, a)| m.max(a));
+    let (span, from) = (4.0 / low, drift / low);
+    Some(
+        (0..WAVE_POINTS)
+            .map(|i| {
+                let t = from + span * i as f64 / (WAVE_POINTS - 1) as f64;
+                let s: f64 = notes.iter().map(|&(n, a)| a as f64 * (std::f64::consts::TAU * note_hz(n) * t).sin()).sum();
+                (s as f32 / total) * loudest // the chord's shape, as tall as its loudest note
+            })
+            .collect(),
+    )
 }
 
 /// A spyglass's eyepiece: see-through dark glass, darker toward the edge (no dot of light at 11 o'clock: nothing on the glass),
@@ -245,14 +305,17 @@ mod wave_tests {
     use super::*;
 
     #[test]
-    fn one_note_is_four_periods_of_a_sine() {
-        let w = waveform(&[69]).unwrap(); // A4
+    fn follows_how_hard_and_moves() {
+        let w = waveform(&[(69, 1.0)], 0.0).unwrap(); // A4, hit hard
         assert_eq!(w.len(), WAVE_POINTS);
-        assert!(w[0].abs() < 1e-6 && w[WAVE_POINTS - 1].abs() < 0.01, "starts and ends at zero");
-        assert!((w.iter().cloned().fold(f32::MIN, f32::max) - 1.0).abs() < 1e-6);
-        assert!(waveform(&[]).is_none());
-        let chord = waveform(&[60, 64, 67]).unwrap();
-        assert!(chord.iter().all(|s| s.abs() <= 1.0));
+        assert!(w[0].abs() < 1e-6, "starts at zero");
+        assert!((w.iter().cloned().fold(f32::MIN, f32::max) - 1.0).abs() < 1e-3);
+        let soft = waveform(&[(69, 0.3)], 0.0).unwrap();
+        assert!((soft.iter().cloned().fold(f32::MIN, f32::max) - 0.3).abs() < 1e-3, "a soft note is lower");
+        let later = waveform(&[(69, 1.0)], 0.25).unwrap();
+        assert!((later[0] - 1.0).abs() < 1e-3, "a quarter period on, it starts at the top");
+        assert!(waveform(&[], 0.0).is_none() && waveform(&[(60, 0.0)], 0.0).is_none());
+        assert!(waveform(&[(60, 0.8), (64, 0.5), (67, 1.0)], 0.3).unwrap().iter().all(|s| s.abs() <= 1.0));
     }
 }
 

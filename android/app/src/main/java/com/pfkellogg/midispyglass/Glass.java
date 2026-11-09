@@ -26,8 +26,8 @@ import java.util.Locale;
 
 /**
  * The spyglass (from FM-1 Mirror + Spyglass, after Synth Spyglass for Android): the last note or chord
- * played on any MIDI input in a round brass eyepiece, with the notes on a staff, their waveform, and how
- * hard the key was hit. Drag it to move it; pinch it, or tap it and drag the grip on its rim, to resize it; tap it
+ * played on any MIDI input in a round brass eyepiece, with the notes on a staff, their waveform (live: it moves while
+ * keys are held, as tall as they were hit, and fades when they come up), and how hard the key was hit. Drag it to move it; pinch it, or tap it and drag the grip on its rim, to resize it; tap it
  * and ≡ for the MIDI inputs. Where it is and its size are remembered.
  */
 final class Glass extends FrameLayout {
@@ -52,6 +52,12 @@ final class Glass extends FrameLayout {
     private boolean wave;
     private final android.graphics.Path waveLine = new android.graphics.Path();
     private static final int WAVE = Color.rgb(80, 200, 255), WAVE_QUIET = Color.rgb(110, 120, 130), WAVE_POINTS = 240;
+    /** The live waveform's notes: held, or fading after their key came up (note, level, time up or -1). */
+    private final java.util.List<float[]> sounding = new java.util.ArrayList<>();
+    private final java.util.List<Long> soundingUp = new java.util.ArrayList<>();
+    private long waveStart = -1;
+    private static final long FADE_MS = 600;
+    private static final double DRIFT = 0.9; // periods of the lowest note a second: it runs like a scope's
     /** What's playing, across the top (null: not known, or turned off). */
     private String sound;
     private boolean soundOn;
@@ -346,6 +352,10 @@ final class Glass extends FrameLayout {
                     showNothing();
                 }
             }
+            if (wave) {
+                follow(played.held(), System.currentTimeMillis());
+                if (!sounding.isEmpty() || waveStart >= 0) invalidate();
+            }
             String s = soundOn ? played.sound() : null;
             if (s == null ? sound != null : !s.equals(sound)) {
                 sound = s;
@@ -364,24 +374,69 @@ final class Glass extends FrameLayout {
     }
 
     /**
-     * The notes' sound as a scope would show it, made from MIDI alone: a sine at each note's pitch, added up (a
-     * chord's beating shape), over four periods of the lowest note, starting at zero going up. Scaled to ±1.
+     * The notes' sound as a scope would show it, made from MIDI alone: a sine at each note's pitch and level
+     * (0-1), added up (a chord's beating shape), over four periods of the lowest note, `drift` periods along.
+     * ±1 is everything at full loudness in step; null when nothing sounds.
      */
-    static float[] waveform(int[] keys) {
-        if (keys == null || keys.length == 0) return null;
-        int low = keys[0];
-        for (int k : keys) low = Math.min(low, k);
-        double span = 4.0 / NoteNames.hz(low), peak = 0;
+    static float[] waveform(float[][] notes, double drift) {
+        if (notes.length == 0) return null;
+        float low = 127, total = 0, loudest = 0;
+        for (float[] n : notes) {
+            low = Math.min(low, n[0]);
+            total += n[1];
+            loudest = Math.max(loudest, n[1]);
+        }
+        if (total <= 0.001f) return null;
+        double f0 = NoteNames.hz((int) low), span = 4.0 / f0, from = drift / f0;
         float[] w = new float[WAVE_POINTS];
         for (int i = 0; i < WAVE_POINTS; i++) {
-            double t = span * i / (WAVE_POINTS - 1), s = 0;
-            for (int k : keys) s += Math.sin(2 * Math.PI * NoteNames.hz(k) * t);
-            w[i] = (float) s;
-            peak = Math.max(peak, Math.abs(s));
+            double t = from + span * i / (WAVE_POINTS - 1), s = 0;
+            for (float[] n : notes) s += n[1] * Math.sin(2 * Math.PI * NoteNames.hz((int) n[0]) * t);
+            w[i] = (float) s / total * loudest; // the chord's shape, as tall as its loudest note
         }
-        if (peak == 0) return null;
-        for (int i = 0; i < WAVE_POINTS; i++) w[i] /= (float) peak;
         return w;
+    }
+
+    /** Keeps the waveform's notes up with the keys: new ones join at their level, released ones fade out. */
+    private void follow(float[][] held, long now) {
+        for (int i = 0; i < sounding.size(); i++) {
+            float[] v = sounding.get(i);
+            float[] h = null;
+            for (float[] x : held) if (x[0] == v[0]) h = x;
+            if (h != null) {
+                v[1] = h[1];
+                soundingUp.set(i, -1L);
+            } else if (soundingUp.get(i) < 0) soundingUp.set(i, now);
+        }
+        for (float[] h : held) {
+            boolean have = false;
+            for (float[] v : sounding) if (v[0] == h[0]) have = true;
+            if (!have) {
+                sounding.add(new float[] {h[0], h[1]});
+                soundingUp.add(-1L);
+            }
+        }
+        for (int i = sounding.size() - 1; i >= 0; i--) {
+            long up = soundingUp.get(i);
+            if (up >= 0 && now - up >= FADE_MS) {
+                sounding.remove(i);
+                soundingUp.remove(i);
+            }
+        }
+        waveStart = sounding.isEmpty() ? -1 : waveStart < 0 ? now : waveStart;
+    }
+
+    /** The waveform now: each sounding note at its level (fading after release), drifting with time. */
+    private float[] liveWave() {
+        if (waveStart < 0) return null;
+        long now = System.currentTimeMillis();
+        float[][] notes = new float[sounding.size()][];
+        for (int i = 0; i < notes.length; i++) {
+            long up = soundingUp.get(i);
+            float fade = up < 0 ? 1 : Math.max(0, 1 - (now - up) / (float) FADE_MS);
+            notes[i] = new float[] {sounding.get(i)[0], sounding.get(i)[1] * fade};
+        }
+        return waveform(notes, (now - waveStart) / 1000.0 * DRIFT);
     }
 
     boolean soundOn() { return soundOn; }
@@ -435,7 +490,7 @@ final class Glass extends FrameLayout {
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(Math.max(2 * density, d * 0.006f));
             p.setStrokeJoin(Paint.Join.ROUND);
-            float[] w = waveform(shownNotes);
+            float[] w = liveWave();
             waveLine.reset();
             if (w != null) {
                 p.setColor(WAVE);

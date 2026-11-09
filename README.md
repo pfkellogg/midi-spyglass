@@ -5,7 +5,8 @@ app. A round brass eyepiece floats over everything and shows what you play:
 
 - the **note** or **chord** name (C major, Cmaj7, …), big
 - the notes on a **grand staff**
-- a **waveform** of the notes, beside the staff
+- a live **waveform** of the notes, beside the staff: it runs while you hold keys, is as tall as you hit them,
+  and fades when you let go
 - the full name, the pitch in Hz, and **how hard** the key was hit
 - the **sound**, across the top: the General MIDI name of the last Program Change on that input and channel
   (for example *Electric Piano 1 · 5*), or the keyboard's name until one comes
@@ -48,8 +49,9 @@ MIDI carries notes, not sound. So:
 - The **sound name** comes from Program Change messages. Its General MIDI name is right for General MIDI
   synths and apps; other synths number their sounds their own way, so the number after the name is the one to
   trust there.
-- The **waveform** is drawn from the notes themselves: a sine at each note's pitch, added up, so one note is a
-  clean wave and a chord shows its combined shape. It isn't your synth's actual sound.
+- The **waveform** is drawn from the notes themselves: a sine at each held note's pitch and loudness, added up,
+  so one note is a clean wave and a chord shows its combined shape, moving like a scope's. It isn't your synth's
+  actual sound.
 
 ## Building
 
