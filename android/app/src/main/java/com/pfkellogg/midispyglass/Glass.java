@@ -489,6 +489,15 @@ final class Glass extends FrameLayout {
         invalidate();
     }
 
+    /** The message over the middle when there's nothing to listen to (null: none). */
+    private String alertTitle, alertLine;
+
+    void setAlert(String title, String line) {
+        alertTitle = title;
+        alertLine = line;
+        invalidate();
+    }
+
     void setIdle(String s) {
         if (s.equals(idle)) return;
         idle = s;
@@ -499,7 +508,7 @@ final class Glass extends FrameLayout {
     protected void onDraw(Canvas c) {
         float d = Math.min(getWidth(), getHeight()), cx = getWidth() / 2f, cy = getHeight() / 2f;
         lens(c, cx, cy, d);
-        if (sound != null) soundBand(c, sound, cx, cy - d * 0.325f, d);
+        if (sound != null && alertTitle == null) soundBand(c, sound, cx, cy - d * 0.325f, d);
         String name, detail;
         if (shownNotes == null) {
             name = "♪";
@@ -558,6 +567,20 @@ final class Glass extends FrameLayout {
             p.setColor(BRASS_LIGHT);
             r.set(cx - w / 2, top, cx - w / 2 + w * shownVel / 127f, top + h);
             c.drawRoundRect(r, h / 2, h / 2, p);
+        }
+        if (alertTitle != null) {
+            // A dark rounded card with a thin brass edge over the middle: the title in brass, what to do under it.
+            float w = d * 0.7f, h = d * 0.24f, top = cy + d * 0.06f - h / 2;
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.argb(235, 8, 10, 13));
+            r.set(cx - w / 2, top, cx + w / 2, top + h);
+            c.drawRoundRect(r, d * 0.04f, d * 0.04f, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(1.25f * density);
+            p.setColor(BRASS);
+            c.drawRoundRect(r, d * 0.04f, d * 0.04f, p);
+            label(c, alertTitle, cx, top + h * 0.36f, d * 0.075f, d * 0.62f, BRASS_LIGHT);
+            label(c, alertLine, cx, top + h * 0.72f, Math.max(11 * density, d * 0.045f), d * 0.62f, Color.WHITE);
         }
     }
 

@@ -44,7 +44,8 @@ public final class MainActivity extends Activity {
         stage.post(() -> glass.place(stage.getWidth(), stage.getHeight()));
         MidiManager mm = getSystemService(MidiManager.class);
         if (mm == null) {
-            glass.setIdle("this device has no MIDI");
+            glass.setIdle("");
+            glass.setAlert("No MIDI found", "This device has no MIDI");
             return;
         }
         inputs = new Inputs(mm, played, this::showState);
@@ -68,7 +69,10 @@ public final class MainActivity extends Activity {
     }
 
     private void showState() {
-        glass.setIdle(inputs.listening() == 0 ? "no MIDI input" : "play a note");
+        boolean none = inputs.listening() == 0;
+        glass.setIdle(none ? "" : "play a note");
+        if (!none) glass.setAlert(null, null);
+        else glass.setAlert("No MIDI found", inputs.all().isEmpty() ? "Plug in a USB or Bluetooth MIDI keyboard" : "Tap the glass, then ≡, to turn an input on");
     }
 
     /** The MIDI inputs, ticked when the spyglass listens to them. */

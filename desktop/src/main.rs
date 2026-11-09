@@ -237,7 +237,9 @@ impl eframe::App for App {
         if self.listener.is_some() && self.glass.hz().is_some() {
             ctx.request_repaint_after(Duration::from_millis(40)); // the real sound keeps moving
         }
-        let idle = if self.inputs.names().is_empty() { "no MIDI input" } else { "play a note" };
+        let no_midi = self.inputs.names().is_empty();
+        let idle = if no_midi { "" } else { "play a note" };
+        let sound = if no_midi { None } else { sound };
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
             let area = ui.max_rect();
             let (c, d) = (area.center(), self.size);
@@ -266,6 +268,10 @@ impl eframe::App for App {
                 ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
             }
             self.glass.draw(ui.painter(), c, d, idle, sound.as_deref(), wave);
+            if no_midi {
+                let line = if midi::ports().is_empty() { "Plug in a MIDI keyboard" } else { "Right-click to turn an input on" };
+                glass::draw_alert(ui.painter(), c, d, "No MIDI found", line);
+            }
             if ui.rect_contains_pointer(area) || grip.dragged() {
                 glass::draw_grip(ui.painter(), grip_at, grip.hovered() || grip.dragged());
             }

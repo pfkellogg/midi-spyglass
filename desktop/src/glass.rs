@@ -281,6 +281,25 @@ pub fn waveform(notes: &[(u8, f32)]) -> Option<Vec<f32>> {
     )
 }
 
+/// The message over the middle of the glass when there's nothing to listen to: a title and a line under it, on a
+/// dark rounded card with a thin brass edge.
+pub fn draw_alert(p: &Painter, c: Pos2, d: f32, title: &str, line: &str) {
+    let room = d * 0.62;
+    let fit = |text: &str, size: f32, color: Color32| {
+        let g = p.layout_no_wrap(text.to_string(), FontId::proportional(size), color);
+        if g.size().x <= room { g } else { p.layout_no_wrap(text.to_string(), FontId::proportional(size * room / g.size().x), color) }
+    };
+    let t = fit(title, d * 0.075, BRASS_LIGHT);
+    let l = fit(line, (d * 0.045).max(11.0), TEXT);
+    let card = Rect::from_center_size(c + vec2(0.0, d * 0.06), vec2(d * 0.7, t.size().y + l.size().y + d * 0.09));
+    let round = CornerRadius::same((d * 0.04).min(255.0) as u8);
+    p.rect_filled(card, round, Color32::from_rgba_unmultiplied(8, 10, 13, 235));
+    p.rect_stroke(card, round, Stroke::new(1.25_f32, BRASS), egui::StrokeKind::Inside);
+    let top = card.top() + d * 0.035;
+    p.galley(Pos2::new(c.x - t.size().x / 2.0, top), t.clone(), BRASS_LIGHT);
+    p.galley(Pos2::new(c.x - l.size().x / 2.0, top + t.size().y + d * 0.02), l, TEXT);
+}
+
 /// A spyglass's eyepiece: see-through dark glass, darker toward the edge (no dot of light at 11 o'clock: nothing on the glass),
 /// and a knurled brass rim lit from the top left (Synth Spyglass's lens()).
 fn lens(p: &Painter, c: Pos2, r: f32, d: f32) {

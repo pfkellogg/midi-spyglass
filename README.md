@@ -1,5 +1,7 @@
 # MIDI Spyglass
 
+**Standalone: no FM-1 required.** Any MIDI keyboard, controller or music app will do.
+
 The spyglass from [FM-1 Mirror](https://github.com/pfkellogg/fm1-mirror), on its own, for any MIDI keyboard or
 app. A round brass eyepiece floats over everything and shows what you play:
 
@@ -12,7 +14,7 @@ app. A round brass eyepiece floats over everything and shows what you play:
   else *FM-1* while its sound is heard; else the General MIDI name of the last Program Change on that input and
   channel (for example *Electric Piano 1 · 5*)
 
-No FM-1 needed. It listens to **every MIDI input** the computer or tablet has, all at once, and picks up a keyboard
+It listens to **every MIDI input** the computer or tablet has, all at once, and picks up a keyboard
 the moment it's plugged in. It only listens, except for a hello once a second to an FM-1, which makes the FM-1's
 Big Screen firmware say the name of its sound.
 
@@ -43,7 +45,10 @@ Mac, Windows, Linux and Android: see [Releases](../../releases).
   waveform on or off.
 - USB keyboards work straight away; a Bluetooth MIDI keyboard once it's paired in Android's settings.
 
-Where it is and its size are remembered.
+Where it is and its size are remembered. With nothing to listen to, it says **No MIDI found** and what to do.
+
+**With an M-VAVE FM-1** (optional): its sound's name shows on top when it runs a Big Screen firmware
+(*T1 FM6 PIANO 1*), and the waveform is its real sound from its USB audio.
 
 ## About the sound name and the waveform
 
