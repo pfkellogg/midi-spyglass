@@ -1,0 +1,40 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.pfkellogg.midispyglass"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.pfkellogg.midispyglass"
+        minSdk 30 // WindowInsetsController for full screen
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+    // Release builds are signed with the key named in ../keystore.properties (kept out of git;
+    // the same key every time, so a new version installs over the old one).
+    def keys = new Properties()
+    def keysFile = rootProject.file("keystore.properties")
+    if (keysFile.exists()) keysFile.withInputStream { keys.load(it) }
+    signingConfigs {
+        release {
+            if (keys.storeFile) {
+                storeFile file(keys.storeFile)
+                storePassword keys.storePassword
+                keyAlias keys.keyAlias
+                keyPassword keys.keyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig keys.storeFile ? signingConfigs.release : null
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

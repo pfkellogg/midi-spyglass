@@ -1,0 +1,64 @@
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: mac
+          - os: windows-latest
+            name: windows
+          - os: ubuntu-22.04
+            name: linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo test
+      - if: matrix.name == 'mac'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          sed -i '' '/\/Applications/d' make_app.sh
+          ./make_app.sh
+          cd dist && ditto -c -k --keepParent "MIDI Spyglass.app" ../MIDI-Spyglass-mac.zip
+      - if: matrix.name == 'windows'
+        run: |
+          cargo build --release
+          copy target\release\midi-spyglass.exe MIDI-Spyglass-windows.exe
+      - if: matrix.name == 'linux'
+        run: |
+          cargo build --release
+          cp target/release/midi-spyglass MIDI-Spyglass-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: midi-spyglass-${{ matrix.name }}
+          path: desktop/MIDI-Spyglass-*
+
+  # On a v* tag: put the downloads on a GitHub Release for that tag (the Android APK is added by hand: it's signed locally).
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l
+          gh release create "${{ github.ref_name }}" MIDI-Spyglass-* --repo "${{ github.repository }}" \
+            --title "MIDI Spyglass ${{ github.ref_name }}" --notes "The spyglass on its own, for any MIDI keyboard or app: Mac, Windows, Linux and Android. See the README."
