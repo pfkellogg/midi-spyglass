@@ -51,13 +51,16 @@ final class Glass extends FrameLayout {
     /** The notes' waveform beside the staff (on unless turned off). */
     private boolean wave;
     private final android.graphics.Path waveLine = new android.graphics.Path();
-    private static final int WAVE = Color.rgb(80, 200, 255), WAVE_QUIET = Color.rgb(110, 120, 130), WAVE_POINTS = 240;
+    private static final int WAVE = Color.rgb(80, 200, 255), WAVE_QUIET = Color.rgb(110, 120, 130), WAVE_POINTS = 960;
     /** The live waveform's notes: held, or fading after their key came up (note, level, time up or -1). */
     private final java.util.List<float[]> sounding = new java.util.ArrayList<>();
     private final java.util.List<Long> soundingUp = new java.util.ArrayList<>();
     private long waveStart = -1;
+    /** The FM-1's real sound, while it's plugged in and listening is allowed (Scope.java). */
+    private Scope scope;
+    private long scopeLookedAt;
     private static final long FADE_MS = 600;
-    private static final double DRIFT = 0.9; // periods of the lowest note a second: it runs like a scope's
+    private static final double WINDOW = 0.02; // seconds shown, as MIDI Bridge's spyglass: an octave up shows twice as many waves
     /** What's playing, across the top (null: not known, or turned off). */
     private String sound;
     private boolean soundOn;
@@ -127,6 +130,8 @@ final class Glass extends FrameLayout {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        if (scope != null) scope.close();
+        scope = null;
         ui.removeCallbacks(ticker);
         ui.removeCallbacks(hideHandles);
     }
@@ -352,11 +357,16 @@ final class Glass extends FrameLayout {
                     showNothing();
                 }
             }
+            long now = System.currentTimeMillis();
+            listen(now);
             if (wave) {
-                follow(played.held(), System.currentTimeMillis());
-                if (!sounding.isEmpty() || waveStart >= 0) invalidate();
+                follow(played.held(), now);
+                if (!sounding.isEmpty() || waveStart >= 0 || (hearing() && shownNotes != null)) invalidate();
             }
-            String s = soundOn ? played.sound() : null;
+            // The header: the sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), else "FM-1" while its sound is
+            // heard, else a Program Change's sound name.
+            String said = played.fm1Sound(), s = said != null ? said : hearing() ? "FM-1" : played.sound();
+            if (!soundOn) s = null;
             if (s == null ? sound != null : !s.equals(sound)) {
                 sound = s;
                 invalidate();
@@ -375,10 +385,10 @@ final class Glass extends FrameLayout {
 
     /**
      * The notes' sound as a scope would show it, made from MIDI alone: a sine at each note's pitch and level
-     * (0-1), added up (a chord's beating shape), over four periods of the lowest note, `drift` periods along.
-     * ±1 is everything at full loudness in step; null when nothing sounds.
+     * (0-1), added up (a chord's beating shape), over WINDOW from zero going up, like a triggered scope's: it
+     * stands still. ±1 is everything at full loudness in step; null when nothing sounds.
      */
-    static float[] waveform(float[][] notes, double drift) {
+    static float[] waveform(float[][] notes) {
         if (notes.length == 0) return null;
         float low = 127, total = 0, loudest = 0;
         for (float[] n : notes) {
@@ -387,10 +397,10 @@ final class Glass extends FrameLayout {
             loudest = Math.max(loudest, n[1]);
         }
         if (total <= 0.001f) return null;
-        double f0 = NoteNames.hz((int) low), span = 4.0 / f0, from = drift / f0;
+
         float[] w = new float[WAVE_POINTS];
         for (int i = 0; i < WAVE_POINTS; i++) {
-            double t = from + span * i / (WAVE_POINTS - 1), s = 0;
+            double t = WINDOW * i / (WAVE_POINTS - 1), s = 0;
             for (float[] n : notes) s += n[1] * Math.sin(2 * Math.PI * NoteNames.hz((int) n[0]) * t);
             w[i] = (float) s / total * loudest; // the chord's shape, as tall as its loudest note
         }
@@ -426,7 +436,39 @@ final class Glass extends FrameLayout {
         waveStart = sounding.isEmpty() ? -1 : waveStart < 0 ? now : waveStart;
     }
 
-    /** The waveform now: each sounding note at its level (fading after release), drifting with time. */
+    /** The FM-1's sound: open it when it's plugged in and allowed (looked for every 2 s). */
+    private void listen(long now) {
+        if (wave && (scope == null || scope.isDead()) && now - scopeLookedAt > 2000) {
+            scopeLookedAt = now;
+            scope = Scope.open(getContext());
+        } else if (!wave && scope != null) {
+            scope.close();
+            scope = null;
+        }
+    }
+
+    private boolean hearing() {
+        return scope != null && scope.listening();
+    }
+
+    /** The note a real sound's wave is lined up on: the lowest sounding, else the one showing. */
+    private double hz() {
+        int low = 128;
+        for (float[] v : sounding) low = Math.min(low, (int) v[0]);
+        if (low == 128 && shownNotes != null) for (int n : shownNotes) low = Math.min(low, n);
+        return low == 128 ? 0 : NoteNames.hz(low);
+    }
+
+    /** The waveform: the FM-1's real sound while it's heard (a flat line while it's quiet), else drawn from the notes. */
+    private float[] waveNow() {
+        if (hearing()) {
+            double hz = hz();
+            return hz > 0 ? scope.wave(hz) : null;
+        }
+        return liveWave();
+    }
+
+    /** The waveform drawn from the notes now: each sounding note at its level (fading after release). */
     private float[] liveWave() {
         if (waveStart < 0) return null;
         long now = System.currentTimeMillis();
@@ -436,7 +478,7 @@ final class Glass extends FrameLayout {
             float fade = up < 0 ? 1 : Math.max(0, 1 - (now - up) / (float) FADE_MS);
             notes[i] = new float[] {sounding.get(i)[0], sounding.get(i)[1] * fade};
         }
-        return waveform(notes, (now - waveStart) / 1000.0 * DRIFT);
+        return waveform(notes);
     }
 
     boolean soundOn() { return soundOn; }
@@ -490,7 +532,7 @@ final class Glass extends FrameLayout {
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(Math.max(2 * density, d * 0.006f));
             p.setStrokeJoin(Paint.Join.ROUND);
-            float[] w = liveWave();
+            float[] w = waveNow();
             waveLine.reset();
             if (w != null) {
                 p.setColor(WAVE);

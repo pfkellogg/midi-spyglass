@@ -16,6 +16,10 @@ final class Played {
     private final java.util.Map<String, int[]> programs = new java.util.HashMap<>();
     private int lastChannel;
     private String lastSource;
+    /** What the FM-1 says it's playing ("T1 FM6 PIANO 1"), and when it said it (it says it after every hello). */
+    private String fm1Sound;
+    private long fm1SoundAt;
+    private static final long FM1_SOUND_STALE_MS = 3000;
 
     Stream stream(String source) { return new Stream(source); }
 
@@ -23,6 +27,9 @@ final class Played {
     final class Stream {
         private final String source;
         private int status, d1, have;
+        /** A SysEx coming in, while it's short enough to be the FM-1's sound name (F0 7D 'F' 'S' 02 name F7). */
+        private final byte[] sx = new byte[64];
+        private int sxLen = -1;
 
         Stream(String source) {
             this.source = source;
@@ -33,6 +40,25 @@ final class Played {
                 for (int i = offset; i < offset + count; i++) {
                     int b = m[i] & 0xff;
                     if (b >= 0xf8) continue; // clock and the like
+                    if (b == 0xf0) sxLen = 0;
+                    if (sxLen >= 0) {
+                        if (b == 0xf7) {
+                            sysex(sx, sxLen);
+                            sxLen = -1;
+                        } else if (b >= 0x80 && b != 0xf0) {
+                            sxLen = -1; // a status byte ends a SysEx that never closed
+                        } else if (sxLen < sx.length) {
+                            sx[sxLen++] = (byte) b;
+                            continue;
+                        } else {
+                            sxLen = -2; // too long for a name: one of its screen rows; wait for its end
+                            continue;
+                        }
+                    } else if (sxLen == -2) {
+                        if (b == 0xf7) sxLen = -1;
+                        if (b < 0x80 || b == 0xf7) continue;
+                        sxLen = -1;
+                    }
                     if (b >= 0x80) {
                         status = b < 0xf0 ? b : 0;
                         have = 0;
@@ -67,6 +93,15 @@ final class Played {
         }
     }
 
+    /** An FM-1 saying the sound it's playing: F0 7D 'F' 'S' 02 and its name. */
+    private void sysex(byte[] s, int n) {
+        if (n < 5 || s[0] != (byte) 0xf0 || s[1] != 0x7d || s[2] != 'F' || s[3] != 'S' || s[4] != 2) return;
+        StringBuilder b = new StringBuilder();
+        for (int i = 5; i < n; i++) if (s[i] >= 0x20 && s[i] < 0x7f) b.append((char) s[i]);
+        fm1Sound = b.toString().trim().replaceAll("\\s+", " ");
+        fm1SoundAt = System.currentTimeMillis();
+    }
+
     private void event(int type, int note, int value) {
         if (type == 0x90 && value > 0) {
             down[note] = true;
@@ -85,11 +120,16 @@ final class Played {
 
     synchronized long noteOns() { return noteOns; }
 
-    /** What's playing: the sound the last note's channel picked on its input, if a Program Change said; else the input. */
+    /** The sound the FM-1 says it's playing, while it keeps saying it. */
+    synchronized String fm1Sound() {
+        return fm1Sound != null && !fm1Sound.isEmpty() && System.currentTimeMillis() - fm1SoundAt < FM1_SOUND_STALE_MS ? fm1Sound : null;
+    }
+
+    /** The sound the last note's channel picked on its input, if a Program Change said. */
     synchronized String sound() {
         if (lastSource == null) return null;
         int[] pr = programs.get(lastSource);
-        return pr != null && pr[lastChannel] >= 0 ? Gm.soundName(lastChannel, pr[lastChannel]) : lastSource;
+        return pr != null && pr[lastChannel] >= 0 ? Gm.soundName(lastChannel, pr[lastChannel]) : null;
     }
 
     synchronized int lastNote() { return lastNote; }

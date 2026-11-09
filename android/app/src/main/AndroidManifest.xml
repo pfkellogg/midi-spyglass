@@ -3,6 +3,8 @@
 
     <uses-feature android:name="android.software.midi" android:required="true" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- The FM-1's sound over USB, for the waveform (Scope.java). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:label="MIDI Spyglass"

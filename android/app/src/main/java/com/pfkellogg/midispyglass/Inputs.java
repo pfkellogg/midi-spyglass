@@ -2,6 +2,7 @@ package com.pfkellogg.midispyglass;
 
 import android.media.midi.MidiDevice;
 import android.media.midi.MidiDeviceInfo;
+import android.media.midi.MidiInputPort;
 import android.media.midi.MidiManager;
 import android.media.midi.MidiOutputPort;
 import android.media.midi.MidiReceiver;
@@ -21,7 +22,8 @@ import java.util.Set;
 /**
  * Every MIDI device that sends notes (a USB keyboard, a Bluetooth one once Android has paired it, another
  * app's virtual port), all at once, into one Played. Devices that come and go are picked up as they do.
- * Nothing is sent anywhere: the spyglass only listens.
+ * The only thing sent is a hello to an FM-1 with Big Screen firmware, about once a second: that's what makes it
+ * say the name of the sound playing ("T1 FM6 PIANO 1"), as it does for FM-1 Mirror + Spyglass.
  */
 final class Inputs {
     private final MidiManager mm;
@@ -36,6 +38,8 @@ final class Inputs {
         final MidiDeviceInfo info;
         final MidiDevice device;
         final List<MidiOutputPort> ports = new ArrayList<>();
+        /** An FM-1's MIDI in: where the hellos go. */
+        MidiInputPort hello;
 
         Open(MidiDeviceInfo info, MidiDevice device) {
             this.info = info;
@@ -44,6 +48,12 @@ final class Inputs {
 
         @Override
         public void close() {
+            if (hello != null) {
+                try {
+                    hello.close();
+                } catch (IOException ignored) {
+                }
+            }
             for (MidiOutputPort p : ports) {
                 try {
                     p.close();
@@ -77,12 +87,38 @@ final class Inputs {
         this.changed = changed;
     }
 
+    private static final byte[] HELLO = {(byte) 0xf0, 0x7d, 'F', 'S', 0, (byte) 0xf7};
+    private static final String[] FM1_HINTS = {"fm-1", "fm1", "felucca", "melodee", "choralroot", "loom-8", "jiant"};
+
+    static boolean isFm1(MidiDeviceInfo i) {
+        String n = name(i).toLowerCase(java.util.Locale.US);
+        for (String h : FM1_HINTS) if (n.contains(h)) return true;
+        return false;
+    }
+
+    /** Hello to each FM-1, about once a second (it stops saying its sound three seconds after the last). */
+    private final Runnable greet = new Runnable() {
+        @Override
+        public void run() {
+            for (Open o : open.values()) {
+                if (o.hello == null) continue;
+                try {
+                    o.hello.send(HELLO, 0, HELLO.length);
+                } catch (IOException ignored) {
+                }
+            }
+            ui.postDelayed(this, 900);
+        }
+    };
+
     void start() {
         mm.registerDeviceCallback(watch, ui);
         for (MidiDeviceInfo i : mm.getDevices()) consider(i);
+        ui.post(greet);
     }
 
     void stop() {
+        ui.removeCallbacks(greet);
         mm.unregisterDeviceCallback(watch);
         for (Open o : open.values()) o.close();
         open.clear();
@@ -137,6 +173,7 @@ final class Inputs {
                 });
                 o.ports.add(port);
             }
+            if (isFm1(info) && info.getInputPortCount() > 0) o.hello = device.openInputPort(0);
             open.put(info.getId(), o);
             changed.run();
         }, ui);

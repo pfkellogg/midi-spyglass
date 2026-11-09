@@ -56,6 +56,9 @@ public final class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         if (inputs != null) inputs.start();
+        // The FM-1's real sound for the waveform comes over its USB cable as an audio input: Android calls that the microphone.
+        if (Scope.findDevice(this) != null && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, 8);
     }
 
     @Override
