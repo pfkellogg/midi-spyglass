@@ -31,7 +31,7 @@ const APP_NAME: &str = "MIDI Spyglass";
 const PAD: f32 = 14.0;
 const SIZES: (f32, f32) = (180.0, 900.0);
 /// How often to look for MIDI inputs plugged in or gone.
-const LOOK_EVERY: Duration = Duration::from_secs(2);
+const LOOK_EVERY: Duration = Duration::from_secs(1);
 
 fn settings_file() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join(APP_NAME).join("settings.json"))
