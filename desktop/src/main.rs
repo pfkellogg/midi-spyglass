@@ -16,6 +16,7 @@ mod glyphs;
 mod gm;
 mod midi;
 mod scope;
+mod softsynth;
 mod staff;
 
 use std::path::PathBuf;
@@ -56,6 +57,9 @@ struct App {
     sound_in: Arc<scope::Audio>,
     /// The MIDI connections fill the glass (a click on it).
     picker: bool,
+    /// The soft synths on this Mac, and when they were last looked at.
+    synths: Vec<softsynth::SoftSynth>,
+    synths_at: Instant,
     ring: Arc<Mutex<scope::Ring>>,
     dirty: bool,
     saved_at: Instant,
@@ -82,6 +86,8 @@ impl App {
             audio: saved["audio"].as_str().map(String::from),
             sound_in: scope::start(ring.clone()),
             picker: std::env::var_os("MIDI_SPYGLASS_PICKER").is_some(), // (open at start: for screenshots)
+            synths: softsynth::installed(),
+            synths_at: Instant::now(),
             ring,
             dirty: false,
             saved_at: Instant::now(),
@@ -111,6 +117,10 @@ impl App {
         self.looked = Some(Instant::now());
         let ctx = ctx.clone();
         self.inputs.refresh(&self.played, &move || ctx.request_repaint());
+        if self.synths_at.elapsed() > Duration::from_secs(3) {
+            softsynth::refresh(&mut self.synths); // (opened, quit, or set to another input since)
+            self.synths_at = Instant::now();
+        }
         self.listen();
     }
 
@@ -181,14 +191,50 @@ impl App {
                 if outs.is_empty() {
                     ui.label("No MIDI outputs");
                 }
-                for n in outs {
+                for n in outs.clone() {
                     let on = self.inputs.to.contains(&n);
-                    let label = if midi::is_fm1(&n) && !n.to_lowercase().contains("fm-1") { format!("{n} (FM-1)") } else { n.clone() };
+                    // A bus a soft synth listens to says who plays it: "IAC Driver Bus 1: Analog Lab V".
+                    let who: Vec<&str> = self.synths.iter().filter(|s| s.plays(&n)).map(|s| s.name.as_str()).collect();
+                    let label = if midi::is_fm1(&n) && !n.to_lowercase().contains("fm-1") {
+                        format!("{n} (FM-1)")
+                    } else if !who.is_empty() {
+                        format!("{n} \u{2192} {}", who.join(", "))
+                    } else {
+                        n.clone()
+                    };
                     if row(ui, on, ("\u{2611}", "\u{2610}"), &label) {
                         if !on {
                             self.inputs.to.insert(n);
                         } else {
                             self.inputs.to.remove(&n);
+                        }
+                        changed = true;
+                    }
+                }
+                // The soft synths, by name: each plays what comes down the bus it listens to. Ticking one ticks that
+                // bus and opens it; it's on while it's open and its bus is ticked.
+                let soft: Vec<(String, String, bool)> = self
+                    .synths
+                    .iter()
+                    .filter_map(|s| s.inputs.as_ref().and_then(|i| i.iter().find(|b| outs.contains(*b))).map(|b| (s.name.clone(), b.clone(), s.open)))
+                    .collect();
+                if !soft.is_empty() {
+                    ui.add_space(size * 0.3);
+                    head(ui, "Soft synths");
+                }
+                for (name, bus, open) in soft {
+                    let on = open && self.inputs.to.contains(&bus);
+                    let label = if open { format!("{name}  ({bus})") } else { format!("{name}  (opens it)") };
+                    if row(ui, on, ("\u{2611}", "\u{2610}"), &label) {
+                        if on {
+                            self.inputs.to.remove(&bus);
+                        } else {
+                            self.inputs.to.insert(bus.clone());
+                            if !open {
+                                if let Some(s) = self.synths.iter().find(|s| s.name == name) {
+                                    s.launch();
+                                }
+                            }
                         }
                         changed = true;
                     }
