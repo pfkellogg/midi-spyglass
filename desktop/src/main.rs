@@ -198,7 +198,7 @@ impl App {
                     let label = if midi::is_fm1(&n) && !n.to_lowercase().contains("fm-1") {
                         format!("{n} (FM-1)")
                     } else if !who.is_empty() {
-                        format!("{n} \u{2192} {}", who.join(", "))
+                        format!("{n}: {}", who.join(", "))
                     } else {
                         n.clone()
                     };
