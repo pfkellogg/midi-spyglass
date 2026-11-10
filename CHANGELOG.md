@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (2026-11-10)
+## 1.2.1 (2026-11-10)
 
 - **The pitch to one decimal** ("C4 261.6 Hz").
 - **Devices are looked for every second** (was every two), so a keyboard or synth plugged in shows at once; nothing
