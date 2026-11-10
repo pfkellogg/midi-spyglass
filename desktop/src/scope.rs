@@ -72,16 +72,62 @@ impl Ring {
     }
 }
 
-/// The input stream; dropping it stops listening.
-pub struct Listener {
-    _stream: cpal::Stream,
-    dead: Arc<AtomicBool>,
+/// The audio inputs there are now, by name.
+pub fn devices() -> Vec<String> {
+    cpal::default_host().input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default()
 }
 
-impl Listener {
-    pub fn dead(&self) -> bool {
-        self.dead.load(Ordering::Relaxed)
+/// What to listen to: `None`, an FM-1's USB audio if one is plugged in; `Some("")`, nothing; else that input.
+pub fn wanted(choice: Option<&str>) -> Option<String> {
+    match choice {
+        Some("") => None,
+        Some(name) => devices().into_iter().find(|n| n == name),
+        None => devices().into_iter().find(|n| is_fm1(n)),
     }
+}
+
+/// Everything about audio happens on one thread of its own: listing the inputs, opening one, listening. Opening
+/// can wait a long time (macOS asking for the microphone, a busy device), and while it does every other audio call
+/// in the app waits too, so the spyglass never makes one: it sets what it wants here and reads what's heard.
+#[derive(Default)]
+pub struct Audio {
+    /// What the spyglass wants: the waveform on, and the choice (`wanted`).
+    pub want: Mutex<(bool, Option<String>)>,
+    /// The audio inputs there are, and the one listened to now.
+    pub devices: Mutex<Vec<String>>,
+    pub open: Mutex<Option<String>>,
+}
+
+/// Starts the audio thread; it looks at what's wanted twice a second.
+pub fn start(ring: Arc<Mutex<Ring>>) -> Arc<Audio> {
+    let audio = Arc::new(Audio::default());
+    let a = audio.clone();
+    let _ = std::thread::Builder::new().name("MIDI Spyglass sound".into()).spawn(move || {
+        let mut stream: Option<(String, cpal::Stream)> = None;
+        let mut dead = Arc::new(AtomicBool::new(false));
+        let mut tried: Option<(String, Instant)> = None;
+        loop {
+            let (on, choice) = a.want.lock().unwrap().clone();
+            *a.devices.lock().unwrap() = devices();
+            let want = if on { wanted(choice.as_deref()) } else { None };
+            if stream.as_ref().map(|(n, _)| n) != want.as_ref() || dead.load(Ordering::Relaxed) {
+                stream = None;
+                *a.open.lock().unwrap() = None;
+                // (one that failed is tried again every 5 s, not every look)
+                let again = tried.as_ref().is_none_or(|(n, t)| Some(n) != want.as_ref() || t.elapsed() > Duration::from_secs(5));
+                if let (Some(name), true) = (want, again) {
+                    dead = Arc::new(AtomicBool::new(false));
+                    tried = Some((name.clone(), Instant::now()));
+                    if let Some(s) = open_stream(ring.clone(), &name, dead.clone()) {
+                        *a.open.lock().unwrap() = Some(name.clone());
+                        stream = Some((name, s));
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+    audio
 }
 
 /// What the header calls an input's sound: "FM-1" for an FM-1's USB audio (as MIDI Bridge's spyglass), else its name.
@@ -105,29 +151,13 @@ fn feed<T: Copy>(ring: &Mutex<Ring>, data: &[T], channels: usize, sample: impl F
     }
 }
 
-/// The audio inputs there are now, by name.
-pub fn devices() -> Vec<String> {
-    cpal::default_host().input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default()
-}
-
-/// What to listen to: `None`, an FM-1's USB audio if one is plugged in; `Some("")`, nothing; else that input.
-pub fn wanted(choice: Option<&str>) -> Option<String> {
-    match choice {
-        Some("") => None,
-        Some(name) => devices().into_iter().find(|n| n == name),
-        None => devices().into_iter().find(|n| is_fm1(n)),
-    }
-}
-
-/// Starts listening to the input named `name`; none if it isn't there or isn't allowed.
-pub fn open(ring: Arc<Mutex<Ring>>, name: &str) -> Option<Listener> {
+/// The input stream, playing; none if it isn't there or isn't allowed. Errors later set `dead`.
+fn open_stream(ring: Arc<Mutex<Ring>>, name: &str, dead: Arc<AtomicBool>) -> Option<cpal::Stream> {
     let device = cpal::default_host().input_devices().ok()?.find(|d| d.name().is_ok_and(|n| n == name))?;
     let config = device.default_input_config().ok()?;
     let channels = config.channels() as usize;
     ring.lock().ok()?.rate = config.sample_rate().0 as f32;
-    let dead = Arc::new(AtomicBool::new(false));
-    let gone = dead.clone();
-    let on_error = move |_| gone.store(true, Ordering::Relaxed);
+    let on_error = move |_| dead.store(true, Ordering::Relaxed);
     let stream_config = config.config();
     let r = ring.clone();
     let stream = match config.sample_format() {
@@ -138,7 +168,7 @@ pub fn open(ring: Arc<Mutex<Ring>>, name: &str) -> Option<Listener> {
     }
     .ok()?;
     stream.play().ok()?;
-    Some(Listener { _stream: stream, dead })
+    Some(stream)
 }
 
 #[cfg(test)]

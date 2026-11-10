@@ -157,29 +157,142 @@ pub fn ports() -> Vec<String> {
     input.ports().iter().filter_map(|p| input.port_name(p).ok()).filter(|n| !n.contains(CLIENT)).collect()
 }
 
-/// The open inputs. `skip`: names the user turned off.
-#[derive(Default)]
+/// The outputs there are now, by name.
+pub fn out_ports() -> Vec<String> {
+    let Ok(out) = MidiOutput::new(CLIENT) else { return vec![] };
+    out.ports().iter().filter_map(|p| out.port_name(p).ok()).filter(|n| !n.contains(CLIENT)).collect()
+}
+
+/// How a port ranks for being picked first: keyboards, then other devices (an FM-1, an interface), then ports that
+/// aren't instruments (the Mac's IAC bus, a keyboard's Transport or DAW port).
+pub fn rank(name: &str) -> u8 {
+    let n = name.to_lowercase();
+    let other = ["iac", "bridge", "spyglass", "network", "session", "virtual", "wi-fi", "loopmidi", "through", "transport", "daw", "ctrl"];
+    let keyboard = ["key", "piano", "minilab", "launch", "oxygen", "keystep", "microkorg", "akai", "arturia", "novation", "m-audio", "roland", "yamaha", "casio", "korg", "nektar", "alesis"];
+    if other.iter().any(|h| n.contains(h)) {
+        2
+    } else if keyboard.iter().any(|h| n.contains(h)) {
+        0
+    } else {
+        1
+    }
+}
+
+/// `names` keyboards first (by name within a rank), each once.
+pub fn order(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names.dedup();
+    names.sort_by_key(|n| rank(n));
+    names
+}
+
+/// FROM: what the spyglass shows, and what plays the TO synths.
+#[derive(Clone, PartialEq, Debug)]
+pub enum From {
+    /// The first keyboard (by `order`).
+    Auto,
+    All,
+    Named(String),
+}
+
+impl From {
+    pub fn key(&self) -> String {
+        match self {
+            From::Auto => String::new(),
+            From::All => "*".to_string(),
+            From::Named(n) => n.clone(),
+        }
+    }
+
+    pub fn from_key(k: Option<&str>) -> From {
+        match k {
+            None | Some("") => From::Auto,
+            Some("*") => From::All,
+            Some(n) => From::Named(n.to_string()),
+        }
+    }
+
+    /// Which of the inputs there are now it means.
+    pub fn picks(&self, now: &[String]) -> Vec<String> {
+        match self {
+            From::All => order(now.to_vec()),
+            From::Named(n) => now.iter().filter(|p| *p == n).cloned().collect(),
+            From::Auto => order(now.to_vec()).into_iter().next().into_iter().collect(),
+        }
+    }
+}
+
+/// The TO synths open now; everything played on FROM goes to each.
+type Outs = Arc<Mutex<Vec<(String, MidiOutputConnection)>>>;
+
+/// The open inputs (FROM, and any FM-1 for its sound's name) and the TO outputs.
 pub struct Inputs {
     open: BTreeMap<String, MidiInputConnection<()>>,
-    pub skip: BTreeSet<String>,
+    /// Which inputs are open as FROM (the rest only for an FM-1's sound name).
+    from_open: Vec<String>,
+    pub from: From,
+    pub to: BTreeSet<String>,
+    outs: Outs,
     /// The FM-1 being said hello to, and when last.
     hello: Option<(String, MidiOutputConnection)>,
     hello_at: Option<Instant>,
 }
 
+impl Default for Inputs {
+    fn default() -> Inputs {
+        Inputs { open: BTreeMap::new(), from_open: vec![], from: From::Auto, to: BTreeSet::new(), outs: Arc::default(), hello: None, hello_at: None }
+    }
+}
+
 impl Inputs {
-    /// Opens what's new, closes what's gone or turned off; `on_note` is called (from MIDI threads) after each message.
+    /// Opens what FROM and TO want now, closes what's gone or no longer wanted; `on_note` is called (from MIDI
+    /// threads) after each message.
     pub fn refresh(&mut self, played: &Arc<Mutex<Played>>, on_note: &(impl Fn() + Clone + Send + 'static)) {
         let now = ports();
-        self.open.retain(|name, _| now.contains(name) && !self.skip.contains(name));
-        for name in now {
-            if self.open.contains_key(&name) || self.skip.contains(&name) {
+        let from = self.from.picks(&now);
+        if from != self.from_open {
+            self.open.clear(); // (FROM changed: reopen, so each input is opened the right way)
+            self.from_open = from.clone();
+        }
+        // FROM's inputs, and an FM-1's too for the name of its sound (not shown, not passed on, unless it's FROM).
+        let want: Vec<String> = now.iter().filter(|n| from.contains(n) || is_fm1(n)).cloned().collect();
+        self.open.retain(|name, _| want.contains(name));
+        for name in want {
+            if self.open.contains_key(&name) {
                 continue;
             }
-            if let Some(c) = connect(&name, played.clone(), on_note.clone()) {
+            let shown = from.contains(&name);
+            if let Some(c) = connect(&name, played.clone(), on_note.clone(), shown, self.outs.clone()) {
                 self.open.insert(name, c);
             }
         }
+        // TO: open the ticked outputs there are, close the rest (all notes off on the way out).
+        let outs = out_ports();
+        let mut o = self.outs.lock().unwrap();
+        o.retain_mut(|(name, conn)| {
+            let keep = self.to.contains(name) && outs.contains(name);
+            if !keep {
+                for ch in 0..16u8 {
+                    let _ = conn.send(&[0xB0 | ch, 123, 0]);
+                }
+            }
+            keep
+        });
+        for name in &self.to {
+            if o.iter().any(|(n, _)| n == name) || !outs.contains(name) {
+                continue;
+            }
+            let Ok(out) = MidiOutput::new(CLIENT) else { continue };
+            let Some(port) = out.ports().into_iter().find(|p| out.port_name(p).is_ok_and(|n| n == *name)) else { continue };
+            if let Ok(c) = out.connect(&port, "MIDI Spyglass to") {
+                o.push((name.clone(), c));
+            }
+        }
+    }
+
+    /// The inputs shown (FROM), and the outputs played (TO), open now.
+    pub fn names(&self) -> Vec<String> {
+        self.from_open.iter().filter(|n| self.open.contains_key(*n)).cloned().collect()
     }
 
     /// Says hello to an FM-1 (one listened to), so its Big Screen firmware says the sound playing. Call often.
@@ -203,16 +316,30 @@ impl Inputs {
         }
     }
 
-    pub fn names(&self) -> Vec<String> {
-        self.open.keys().cloned().collect()
+}
+
+/// What goes on to a TO synth: everything but clock and the like, and SysEx (that's how synths are updated); to an
+/// FM-1 on channel 1, where it listens.
+fn pass_on(bytes: &[u8], to_fm1: bool) -> Option<Vec<u8>> {
+    match bytes.first() {
+        None => None,
+        Some(&b) if b >= 0xF0 => None,
+        Some(&b) => {
+            let mut m = bytes.to_vec();
+            if to_fm1 && b >= 0x80 {
+                m[0] = b & 0xF0;
+            }
+            Some(m)
+        }
     }
 }
 
-fn connect(name: &str, played: Arc<Mutex<Played>>, on_note: impl Fn() + Send + 'static) -> Option<MidiInputConnection<()>> {
+fn connect(name: &str, played: Arc<Mutex<Played>>, on_note: impl Fn() + Send + 'static, shown: bool, outs: Outs) -> Option<MidiInputConnection<()>> {
     let mut input = MidiInput::new(CLIENT).ok()?;
     input.ignore(if is_fm1(name) { Ignore::TimeAndActiveSense } else { Ignore::All }); // an FM-1's SysEx: its sound's name
     let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n == name))?;
     let mut parser = Parser { source: name.to_string(), ..Default::default() };
+    let me = name.to_string();
     input
         .connect(&port, "MIDI Spyglass in", move |_, bytes, _| {
             if bytes.first() == Some(&0xf0) {
@@ -221,6 +348,17 @@ fn connect(name: &str, played: Arc<Mutex<Played>>, on_note: impl Fn() + Send + '
                     on_note();
                 }
                 return; // (its screen rows too: nothing for the spyglass)
+            }
+            if !shown {
+                return;
+            }
+            for (to, out) in outs.lock().unwrap().iter_mut() {
+                if *to != me {
+                    // (never back to the port it came from: no loop)
+                    if let Some(m) = pass_on(bytes, is_fm1(to)) {
+                        let _ = out.send(&m);
+                    }
+                }
             }
             parser.feed(bytes, &mut played.lock().unwrap());
             on_note();
@@ -244,6 +382,18 @@ mod tests {
         assert_eq!(played.velocity(), Some(40));
         p.feed(&[0xF0, 0x7D, 1, 0, 0xF7], &mut played);
         assert_eq!(played.note_ons, 4);
+    }
+
+    #[test]
+    fn from_picks_and_passes_on() {
+        let now = ["IAC Driver Bus 1", "Felucca", "Keystation 49 MK3 (Transport)", "Keystation 49 MK3 (USB MIDI)", "AIR 192 6"].map(String::from);
+        assert_eq!(From::Auto.picks(&now), vec!["Keystation 49 MK3 (USB MIDI)".to_string()]);
+        assert_eq!(From::All.picks(&now).len(), 5);
+        assert_eq!(From::Named("Felucca".into()).picks(&now), vec!["Felucca".to_string()]);
+        assert_eq!(From::from_key(Some(&From::All.key())), From::All);
+        assert_eq!(pass_on(&[0x9C, 60, 100], true), Some(vec![0x90, 60, 100]), "to an FM-1: channel 1");
+        assert_eq!(pass_on(&[0x9C, 60, 100], false), Some(vec![0x9C, 60, 100]));
+        assert_eq!(pass_on(&[0xF8], false), None);
     }
 
     #[test]
