@@ -39,7 +39,14 @@ final class Glass extends FrameLayout {
     private static final long HOLD_MS = 3000;   // a note or chord stays this long after the last key comes up
     private long releasedAt = -1;
 
-    private final Played played;
+    private Played played = new Played();
+    /** The pair on show (MainActivity sets it): its keyboard's name for the header with several pairs (null with
+     * one), and whether the FM-1 plays it (then the header and the wave are the FM-1's). */
+    private String pairName;
+    private boolean fm1Plays;
+    private final java.util.function.Supplier<String> fm1Said;
+    private final Runnable onSwitch;
+    private TextView swap;
     private final SharedPreferences prefs;
     private final Runnable onMenu;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -82,9 +89,10 @@ final class Glass extends FrameLayout {
     private int[] settlingKeys = new int[0];
     private long settlingSince;
 
-    Glass(Context c, Played played, SharedPreferences prefs, Runnable onMenu) {
+    Glass(Context c, SharedPreferences prefs, Runnable onMenu, Runnable onSwitch, java.util.function.Supplier<String> fm1Said) {
         super(c);
-        this.played = played;
+        this.onSwitch = onSwitch;
+        this.fm1Said = fm1Said;
         this.prefs = prefs;
         this.onMenu = onMenu;
         density = c.getResources().getDisplayMetrics().density;
@@ -98,6 +106,8 @@ final class Glass extends FrameLayout {
         grip = handle("↔");
         grip.setRotation(45); // a diagonal two-headed arrow
         grip.setOnTouchListener(resize);
+        swap = handle("\u21c4"); // the switch: the next pair (shown with two or more)
+        swap.setOnClickListener(v -> onSwitch.run());
         setOnTouchListener(move);
         size = prefs.getInt("glassSize", Math.round(260 * density));
         wave = prefs.getBoolean("wave", true);
@@ -169,6 +179,15 @@ final class Glass extends FrameLayout {
         grip.setBackground(circle(BRASS, BRASS_SHADOW));
         grip.setTextColor(BRASS_SHADOW);
         grip.setTextSize(TypedValue.COMPLEX_UNIT_PX, g * 0.6f);
+
+        int sw = Math.round(size * 0.1f);
+        FrameLayout.LayoutParams wlp = new FrameLayout.LayoutParams(sw, sw, Gravity.TOP | Gravity.START);
+        wlp.leftMargin = Math.round(size / 2f + size * 0.30f - sw / 2f);
+        wlp.topMargin = Math.round(size / 2f - size * 0.20f - sw / 2f);
+        swap.setLayoutParams(wlp);
+        swap.setBackground(circle(BRASS, BRASS_SHADOW));
+        swap.setTextColor(BRASS_SHADOW);
+        swap.setTextSize(TypedValue.COMPLEX_UNIT_PX, sw * 0.6f);
         invalidate();
     }
 
@@ -361,11 +380,15 @@ final class Glass extends FrameLayout {
             listen(now);
             if (wave) {
                 follow(played.held(), now);
-                if (!sounding.isEmpty() || waveStart >= 0 || (hearing() && shownNotes != null)) invalidate();
+                if (!sounding.isEmpty() || waveStart >= 0 || (fm1Plays && hearing() && shownNotes != null)) invalidate();
             }
             // The header: the sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), else "FM-1" while its sound is
             // heard, else a Program Change's sound name.
-            String said = played.fm1Sound(), s = said != null ? said : hearing() ? "FM-1" : played.sound();
+            String said = fm1Said.get(), s = null;
+            if (fm1Plays) s = said != null ? said : hearing() ? "FM-1" : null;
+            if (s == null) s = played.sound();
+            // With several pairs, the header says whose: "Keystation 49 MK3 · T1 FM6 TINE EP".
+            if (pairName != null) s = s == null ? pairName : pairName + " \u00b7 " + s;
             if (!soundOn) s = null;
             if (s == null ? sound != null : !s.equals(sound)) {
                 sound = s;
@@ -374,6 +397,25 @@ final class Glass extends FrameLayout {
             ui.postDelayed(this, 50);
         }
     };
+
+    /** Shows a pair: its keyboard's notes (`p`), its name for the header (null: don't say), whether the FM-1 plays
+     * it, and the switch with two or more pairs. */
+    void showPair(Played p, String name, boolean fm1, boolean many) {
+        boolean other = p != played;
+        played = p != null ? p : new Played();
+        pairName = name;
+        fm1Plays = fm1;
+        swap.setVisibility(many ? View.VISIBLE : View.GONE);
+        if (other) {
+            seenNoteOns = -1;
+            chordArmed = false;
+            sounding.clear();
+            soundingUp.clear();
+            waveStart = -1;
+            showNothing();
+        }
+        invalidate();
+    }
 
     boolean wave() { return wave; }
 
@@ -461,7 +503,7 @@ final class Glass extends FrameLayout {
 
     /** The waveform: the FM-1's real sound while it's heard (a flat line while it's quiet), else drawn from the notes. */
     private float[] waveNow() {
-        if (hearing()) {
+        if (fm1Plays && hearing()) {
             double hz = hz();
             return hz > 0 ? scope.wave(hz) : null;
         }
