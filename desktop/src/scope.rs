@@ -77,15 +77,6 @@ pub fn devices() -> Vec<String> {
     cpal::default_host().input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default()
 }
 
-/// What to listen to: `None`, an FM-1's USB audio if one is plugged in; `Some("")`, nothing; else that input.
-pub fn wanted(choice: Option<&str>) -> Option<String> {
-    match choice {
-        Some("") => None,
-        Some(name) => devices().into_iter().find(|n| n == name),
-        None => devices().into_iter().find(|n| is_fm1(n)),
-    }
-}
-
 /// Everything about audio happens on one thread of its own: listing the inputs, opening one, listening. Opening
 /// can wait a long time (macOS asking for the microphone, a busy device), and while it does every other audio call
 /// in the app waits too, so the spyglass never makes one: it sets what it wants here and reads what's heard.
@@ -106,10 +97,30 @@ pub fn start(ring: Arc<Mutex<Ring>>) -> Arc<Audio> {
         let mut stream: Option<(String, cpal::Stream)> = None;
         let mut dead = Arc::new(AtomicBool::new(false));
         let mut tried: Option<(String, Instant)> = None;
+        let (mut listed, mut last_asked): (Option<Instant>, Option<(bool, Option<String>)>) = (None, None);
         loop {
             let (on, choice) = a.want.lock().unwrap().clone();
-            *a.devices.lock().unwrap() = devices();
-            let want = if on { wanted(choice.as_deref()) } else { None };
+            // Listing the inputs is real Core Audio work: look every 3 s, or at once when what's wanted changes or the
+            // input went.
+            let asked = (on, choice.clone());
+            let due = listed.is_none_or(|t: Instant| t.elapsed() > Duration::from_secs(3));
+            if !due && last_asked.as_ref() == Some(&asked) && !(stream.is_some() && dead.load(Ordering::Relaxed)) {
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+            listed = Some(Instant::now());
+            last_asked = Some(asked);
+            let found = devices();
+            *a.devices.lock().unwrap() = found.clone();
+            let want = if !on {
+                None
+            } else {
+                match choice.as_deref() {
+                    Some("") => None,
+                    Some(name) => found.iter().find(|n| *n == name).cloned(),
+                    None => found.iter().find(|n| is_fm1(n)).cloned(),
+                }
+            };
             if stream.as_ref().map(|(n, _)| n) != want.as_ref() || dead.load(Ordering::Relaxed) {
                 stream = None;
                 *a.open.lock().unwrap() = None;
@@ -124,7 +135,7 @@ pub fn start(ring: Arc<Mutex<Ring>>) -> Arc<Audio> {
                     }
                 }
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(250));
         }
     });
     audio
