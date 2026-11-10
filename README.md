@@ -15,8 +15,8 @@ app. A round brass eyepiece floats over everything and shows what you play:
   channel (for example *Electric Piano 1 · 5*)
 
 It listens to **every MIDI input** the computer or tablet has, all at once, and picks up a keyboard
-the moment it's plugged in. It only listens, except for a hello once a second to an FM-1, which makes the FM-1's
-Big Screen firmware say the name of its sound.
+the moment it's plugged in. It sends MIDI only to the synths you tick under TO, and a hello once a second to an
+FM-1, which makes the FM-1's Big Screen firmware say the name of its sound.
 
 ![MIDI Spyglass showing C major](docs/spyglass.png)
 
@@ -34,10 +34,14 @@ Mac, Windows, Linux and Android: see [Releases](../../releases).
 ## Using it
 
 **Mac, Windows, Linux**
+- **Click** the glass for its **MIDI connections**, filling its face (like Synth Spyglass's FROM and TO):
+  - **FROM**: what the spyglass shows, and what plays. *Auto* is the first keyboard; or pick one input, or *All inputs*.
+  - **TO**: the synths it plays. Tick one and your keyboard plays it through MIDI Spyglass; tick several to layer them.
+    An FM-1 gets its notes on channel 1, where it listens. Nothing is sent back to the port it came from.
+  - **Done** closes it.
 - **Drag** the spyglass to move it.
 - **Resize** it with the brass grip on its rim (bottom right), or scroll over it.
-- **Right-click** it for the MIDI inputs it listens to (untick one to ignore it), *Sound name*, *Waveform*, *Waveform from*,
-  *Always on top*, and *Quit*.
+- **Right-click** it for *Sound name*, *Waveform*, *Waveform from*, *Always on top*, and *Quit*.
 
 **Android**
 - **Drag** it to move it, **pinch** it to resize it.
