@@ -536,7 +536,7 @@ final class Glass extends FrameLayout {
             label(c, detail, cx, cy + d * 0.365f, Math.max(12 * density, d * 0.055f), d * 0.54f, Color.WHITE);
         }
         if (wave) {
-            // The notes' waveform, right of the staff; a flat grey line while nothing is showing.
+            // The waveform, right of the staff, only while one is playing.
             r.set(cx + d * 0.075f, cy - d * 0.02f, cx + d * 0.355f, cy + d * 0.19f);
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(Math.max(2 * density, d * 0.006f));
@@ -550,11 +550,7 @@ final class Glass extends FrameLayout {
                     if (i == 0) waveLine.moveTo(x, y);
                     else waveLine.lineTo(x, y);
                 }
-            } else {
-                p.setColor(WAVE_QUIET);
-                waveLine.moveTo(r.left, r.centerY());
-                waveLine.lineTo(r.right, r.centerY());
-            }
+            } // (nothing playing: no line at all)
             c.drawPath(waveLine, p);
         }
         if (shownChord == null && shownVel > 0) {

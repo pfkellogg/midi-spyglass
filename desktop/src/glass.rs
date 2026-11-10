@@ -21,7 +21,6 @@ const SOUND: Color32 = Color32::from_rgb(0xf7, 0xdc, 0x92);
 const SOUND_GLASS: Color32 = Color32::from_rgba_premultiplied(14, 11, 5, 225);
 const SOUND_SHINE: Color32 = Color32::from_rgba_premultiplied(10, 9, 6, 18);
 const WAVE: Color32 = Color32::from_rgb(80, 200, 255);
-const WAVE_QUIET: Color32 = Color32::from_rgb(110, 120, 130);
 
 /// The resize grip's place on the rim, lower right, for a spyglass centred on `c`, `d` across.
 pub fn grip_at(c: Pos2, d: f32) -> Pos2 {
@@ -234,7 +233,7 @@ impl Glass {
         let staff_x = if wave { -d * 0.165 } else { 0.0 };
         staff::draw(p, Rect::from_center_size(c + vec2(staff_x, d * 0.087), vec2(w, w * 1.06)), &keys, GLASS, TEXT);
         if wave {
-            // The notes' waveform, right of the staff; a flat grey line while nothing is showing.
+            // The waveform, right of the staff, only while one is playing.
             let r = Rect::from_min_max(c + vec2(d * 0.075, -d * 0.02), c + vec2(d * 0.355, d * 0.19));
             let width = (d * 0.006).max(2.0);
             match shape {
@@ -243,7 +242,7 @@ impl Glass {
                     let line = w.iter().enumerate().map(|(i, &s)| at(i, s)).collect();
                     p.add(egui::Shape::line(line, Stroke::new(width, WAVE)));
                 }
-                None => { p.line_segment([r.left_center(), r.right_center()], Stroke::new(width, WAVE_QUIET)); }
+                None => {} // (nothing playing: no line at all)
             }
         }
         let g = fit(detail, (d * 0.055).max(12.0), d * 0.54);
