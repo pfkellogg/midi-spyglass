@@ -4,8 +4,8 @@
 //! by itself, or drawn from the notes), the pitch, how hard the key was hit, and the sound
 //! ("FM-1" while its sound is heard, else the General MIDI name of a Program Change).
 //!
-//! Click it for its MIDI connections: FROM (what it shows, and what plays) and TO (the synths it plays, ticked
-//! together to layer them), as in Synth Spyglass. Drag it to move it; drag the grip on its rim, or scroll over it, to
+//! Click it for its MIDI connections, as in Synth Spyglass: keyboards (FROM), each with the synths it plays (TO;
+//! several are layered). Several pairs play at once; the switch on the dial picks the one it shows. Drag it to move it; drag the grip on its rim, or scroll over it, to
 //! resize it; right-click it for its settings, and to quit. Where it is and its size are remembered.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows
@@ -42,8 +42,9 @@ fn load() -> serde_json::Value {
 }
 
 struct App {
-    played: Arc<Mutex<midi::Played>>,
     inputs: midi::Inputs,
+    /// The pair the spyglass shows (the switch on the dial goes to the next).
+    current: usize,
     looked: Option<Instant>,
     glass: glass::Glass,
     size: f32,
@@ -72,13 +73,17 @@ impl App {
     fn new(saved: &serde_json::Value) -> App {
         let ring = Arc::new(Mutex::new(scope::Ring::default()));
         let mut inputs = midi::Inputs::default();
-        inputs.from = midi::From::from_key(saved["from"].as_str());
-        if let Some(to) = saved["to"].as_array() {
-            inputs.to = to.iter().filter_map(|s| s.as_str().map(String::from)).collect();
+        let names = |v: &serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default();
+        if let Some(routes) = saved["routes"].as_array() {
+            inputs.routes = routes.iter().map(|r| midi::Route { from: r["from"].as_str().unwrap_or("").to_string(), to: names(&r["to"]) }).collect();
+        } else {
+            // (from 1.1.0: one FROM and its TO; "*", all inputs, is gone: the first keyboard)
+            let from = saved["from"].as_str().filter(|f| *f != "*").unwrap_or("").to_string();
+            inputs.routes = vec![midi::Route { from, to: names(&saved["to"]) }];
         }
         App {
-            played: Arc::new(Mutex::new(midi::Played::default())),
             inputs,
+            current: saved["current"].as_u64().unwrap_or(0) as usize,
             looked: None,
             glass: glass::Glass::default(),
             size: size_of(saved),
@@ -100,7 +105,8 @@ impl App {
     }
 
     fn store(&mut self) {
-        let mut s = json!({ "size": self.size, "on_top": self.on_top, "wave": self.wave, "sound": self.sound, "audio": self.audio, "from": self.inputs.from.key(), "to": self.inputs.to.iter().collect::<Vec<_>>() });
+        let mut s = json!({ "size": self.size, "on_top": self.on_top, "wave": self.wave, "sound": self.sound, "audio": self.audio, "current": self.current,
+            "routes": self.inputs.routes.iter().map(|r| json!({ "from": r.from, "to": r.to.iter().collect::<Vec<_>>() })).collect::<Vec<_>>() });
         if let Some(at) = self.at {
             s["x"] = json!(at.x);
             s["y"] = json!(at.y);
@@ -121,13 +127,13 @@ impl App {
         }
         self.looked = Some(Instant::now());
         let ctx = ctx.clone();
-        self.inputs.refresh(&self.played, &move || ctx.request_repaint());
+        self.inputs.refresh(&move || ctx.request_repaint());
         if self.synths_at.elapsed() > Duration::from_secs(3) {
             softsynth::refresh(&mut self.synths); // (opened, quit, or set to another input since)
             self.synths_at = Instant::now();
         }
         // The soft synths' sound, while one plays: the helper runs only then (started again at most every 5 s).
-        let soft = self.wave && !self.playing().1.is_empty();
+        let soft = self.wave && self.inputs.routes.iter().any(|r| !self.playing_of(r).1.is_empty());
         if !soft || self.tap.as_ref().is_some_and(|t| t.dead()) {
             self.tap = None;
         }
@@ -157,7 +163,7 @@ impl App {
         // layered, whichever is louder now. Else drawn from the notes.
         let (fm1, soft) = self.playing();
         let ring = self.ring.lock().unwrap();
-        let heard = self.listener().is_some() && ring.listening() && (fm1 || soft.is_empty());
+        let heard = self.listener().is_some() && ring.listening() && (fm1 || self.fm1_by_default());
         let tapped = self.tap.as_ref().map(|t| t.ring.lock().unwrap()).filter(|r| r.listening() && !soft.is_empty());
         if heard || tapped.is_some() {
             let Some(hz) = self.glass.hz() else { return Some(None) };
@@ -172,9 +178,25 @@ impl App {
         Some(self.glass.drawn_wave())
     }
 
-    /// What TO plays now: an FM-1 (ticked and open), and the soft synths open on a ticked bus.
+    /// With a single pair that plays nothing, the FM-1's sound is taken to be what's heard (FM-1 Mirror, say, may be
+    /// playing it from the same keyboard); a pair of several that plays nothing has no sound of its own.
+    fn fm1_by_default(&self) -> bool {
+        self.inputs.routes.len() == 1 && self.route().to.is_empty()
+    }
+
+    /// The pair shown (one there is).
+    fn route(&self) -> midi::Route {
+        self.inputs.routes.get(self.current).or(self.inputs.routes.first()).cloned().unwrap_or_default()
+    }
+
+    /// What the pair shown plays now.
     fn playing(&self) -> (bool, Vec<String>) {
-        let open = self.inputs.playing_to();
+        self.playing_of(&self.route())
+    }
+
+    /// What a pair's TO plays now: an FM-1 (ticked and open), and the soft synths open on a ticked bus.
+    fn playing_of(&self, r: &midi::Route) -> (bool, Vec<String>) {
+        let open = self.inputs.playing_to(r);
         let fm1 = open.iter().any(|n| midi::is_fm1(n));
         let soft = self.synths.iter().filter(|s| open.iter().any(|b| s.plays(b))).map(|s| s.name.clone()).collect();
         (fm1, soft)
@@ -205,73 +227,84 @@ impl App {
                     .clicked()
             };
             egui::ScrollArea::vertical().max_height(area.height() - size * 4.6).auto_shrink([false, true]).show(ui, |ui| {
-                head(ui, "FROM: shown, and plays");
+                // Each keyboard (FROM) ticked is a pair; under it, the synths it plays (TO). Several pairs play at
+                // once; the switch on the dial picks the one the spyglass shows.
                 let now = midi::ports();
-                let first = midi::order(now.clone()).into_iter().next();
-                let mut pick = |ui: &mut egui::Ui, label: String, choice: midi::From| {
-                    if row(ui, self.inputs.from == choice, ("\u{23fa}", "\u{25cb}"), &label) && self.inputs.from != choice {
-                        self.inputs.from = choice;
-                        changed = true;
-                    }
-                };
-                pick(ui, format!("Auto: {}", first.as_deref().unwrap_or("none")), midi::From::Auto);
-                for n in midi::order(now.clone()) {
-                    pick(ui, n.clone(), midi::From::Named(n));
-                }
-                pick(ui, "All inputs".to_string(), midi::From::All);
-                ui.add_space(size * 0.4);
-                head(ui, "TO: synths it plays");
                 let outs = midi::order(midi::out_ports());
-                if outs.is_empty() {
-                    ui.label("No MIDI outputs");
-                }
-                for n in outs.clone() {
-                    let on = self.inputs.to.contains(&n);
-                    // A bus a soft synth listens to says who plays it: "IAC Driver Bus 1: Analog Lab V".
-                    let who: Vec<&str> = self.synths.iter().filter(|s| s.plays(&n)).map(|s| s.name.as_str()).collect();
-                    let label = if midi::is_fm1(&n) && !n.to_lowercase().contains("fm-1") {
-                        format!("{n} (FM-1)")
-                    } else if !who.is_empty() {
-                        format!("{n}: {}", who.join(", "))
-                    } else {
-                        n.clone()
-                    };
-                    if row(ui, on, ("\u{2611}", "\u{2610}"), &label) {
-                        if !on {
-                            self.inputs.to.insert(n);
-                        } else {
-                            self.inputs.to.remove(&n);
-                        }
-                        changed = true;
+                // (the first keyboard, "", is named here: changing a pair makes it that keyboard for good)
+                let first = midi::order(now.clone()).into_iter().next().unwrap_or_default();
+                for r in &mut self.inputs.routes {
+                    if r.from.is_empty() && !first.is_empty() {
+                        r.from = first.clone();
                     }
                 }
-                // The soft synths, by name: each plays what comes down the bus it listens to. Ticking one ticks that
-                // bus and opens it; it's on while it's open and its bus is ticked.
-                let soft: Vec<(String, String, bool)> = self
-                    .synths
-                    .iter()
-                    .filter_map(|s| s.inputs.as_ref().and_then(|i| i.iter().find(|b| outs.contains(*b))).map(|b| (s.name.clone(), b.clone(), s.open)))
-                    .collect();
-                if !soft.is_empty() {
-                    ui.add_space(size * 0.3);
-                    head(ui, "Soft synths");
-                }
-                for (name, bus, open) in soft {
-                    let on = open && self.inputs.to.contains(&bus);
-                    let label = if open { format!("{name}  ({bus})") } else { format!("{name}  (opens it)") };
-                    if row(ui, on, ("\u{2611}", "\u{2610}"), &label) {
-                        if on {
-                            self.inputs.to.remove(&bus);
-                        } else {
-                            self.inputs.to.insert(bus.clone());
-                            if !open {
-                                if let Some(s) = self.synths.iter().find(|s| s.name == name) {
-                                    s.launch();
-                                }
+                head(ui, "FROM: keyboards, each with its synths");
+                for input in midi::order(now.clone()) {
+                    let at = self.inputs.routes.iter().position(|r| r.from == input);
+                    if row(ui, at.is_some(), ("\u{2611}", "\u{2610}"), &input) {
+                        match at {
+                            Some(i) => {
+                                self.inputs.routes.remove(i);
+                                self.current = self.current.min(self.inputs.routes.len().saturating_sub(1));
+                            }
+                            None => {
+                                self.inputs.routes.push(midi::Route { from: input.clone(), to: Default::default() });
+                                self.current = self.inputs.routes.len() - 1; // (show the new pair)
                             }
                         }
                         changed = true;
                     }
+                    let Some(i) = self.inputs.routes.iter().position(|r| r.from == input) else { continue };
+                    ui.indent(("to", &input), |ui| {
+                        ui.label(egui::RichText::new("TO").size(size * 0.7).color(gold));
+                        if outs.is_empty() {
+                            ui.label("No MIDI outputs");
+                        }
+                        for n in outs.iter().filter(|n| **n != input) {
+                            let on = self.inputs.routes[i].to.contains(n);
+                            // A bus a soft synth listens to says who plays it: "IAC Driver Bus 1: Analog Lab V".
+                            let who: Vec<&str> = self.synths.iter().filter(|s| s.plays(n)).map(|s| s.name.as_str()).collect();
+                            let label = if midi::is_fm1(n) && !n.to_lowercase().contains("fm-1") {
+                                format!("{n} (FM-1)")
+                            } else if !who.is_empty() {
+                                format!("{n}: {}", who.join(", "))
+                            } else {
+                                n.clone()
+                            };
+                            if row(ui, on, ("\u{2611}", "\u{2610}"), &label) {
+                                if on {
+                                    self.inputs.routes[i].to.remove(n);
+                                } else {
+                                    self.inputs.routes[i].to.insert(n.clone());
+                                }
+                                changed = true;
+                            }
+                        }
+                        // The soft synths, by name: each plays what comes down the bus it listens to. Ticking one
+                        // ticks that bus and opens it; it's on while it's open and its bus is ticked.
+                        let soft: Vec<(String, String, bool)> = self
+                            .synths
+                            .iter()
+                            .filter_map(|s| s.inputs.as_ref().and_then(|b| b.iter().find(|b| outs.contains(*b))).map(|b| (s.name.clone(), b.clone(), s.open)))
+                            .collect();
+                        for (name, bus, open) in soft {
+                            let on = open && self.inputs.routes[i].to.contains(&bus);
+                            let label = if open { format!("{name}  ({bus})") } else { format!("{name}  (opens it)") };
+                            if row(ui, on, ("\u{2611}", "\u{2610}"), &label) {
+                                if on {
+                                    self.inputs.routes[i].to.remove(&bus);
+                                } else {
+                                    self.inputs.routes[i].to.insert(bus.clone());
+                                    if !open {
+                                        if let Some(s) = self.synths.iter().find(|s| s.name == name) {
+                                            s.launch();
+                                        }
+                                    }
+                                }
+                                changed = true;
+                            }
+                        }
+                    });
                 }
             });
             ui.add_space(size * 0.3);
@@ -332,6 +365,11 @@ impl App {
     }
 }
 
+/// A port's name, short, for the header: "Keystation 49 MK3 (USB MIDI)" is "Keystation 49 MK3".
+fn short(name: &str) -> String {
+    name.split(" (").next().unwrap_or(name).to_string()
+}
+
 fn size_of(saved: &serde_json::Value) -> f32 {
     saved["size"].as_f64().map_or(320.0, |d| d as f32).clamp(SIZES.0, SIZES.1)
 }
@@ -353,9 +391,18 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.look_for_inputs(ctx);
         self.inputs.greet();
-        let (changed, said, sound) = {
-            let played = self.played.lock().unwrap();
-            (self.glass.tick(&played), played.fm1_sound(), played.sound())
+        if self.current >= self.inputs.routes.len() {
+            self.current = 0;
+        }
+        let route = self.route();
+        let input = self.inputs.input_of(&route);
+        let said = self.inputs.fm1_sound();
+        let (changed, sound) = match input.as_ref().and_then(|i| self.inputs.played(i)) {
+            Some(p) => {
+                let p = p.lock().unwrap();
+                (self.glass.tick(&p), p.sound())
+            }
+            None => (false, None),
         };
         // The header: the sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), else whose sound is heard ("FM-1",
         // from its USB audio), else a Program Change's sound name.
@@ -370,8 +417,10 @@ impl eframe::App for App {
             let mut parts: Vec<String> = if fm1 { fm1_sound.into_iter().collect() } else { vec![] };
             parts.extend(soft);
             (!parts.is_empty()).then(|| parts.join(" + "))
-        } else {
+        } else if self.fm1_by_default() {
             fm1_sound.or(sound)
+        } else {
+            sound
         };
         // Settling a chord or emptying the glass needs another look soon; otherwise a new message wakes it.
         ctx.request_repaint_after(if self.glass.busy() || changed { Duration::from_millis(40) } else { Duration::from_millis(900) });
@@ -384,7 +433,14 @@ impl eframe::App for App {
         if (self.listener().is_some() || self.tap.is_some()) && self.glass.hz().is_some() {
             ctx.request_repaint_after(Duration::from_millis(40)); // the real sound keeps moving
         }
-        let no_midi = self.inputs.names().is_empty();
+        let no_midi = input.is_none();
+        let many = self.inputs.routes.len() > 1;
+        // With several pairs, the header says whose: "Keystation 49 MK3 · T1 FM6 TINE EP".
+        let sound = match (&input, sound) {
+            (Some(i), Some(s)) if many => Some(format!("{} \u{b7} {s}", short(i))),
+            (Some(i), None) if many => Some(short(i)),
+            (_, s) => s,
+        };
         let idle = if no_midi { "" } else { "play a note" };
         let sound = if no_midi { None } else { sound };
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
@@ -421,6 +477,18 @@ impl eframe::App for App {
                 self.glass.draw(ui.painter(), c, d, "", None, None); // (just the eyepiece: the connections cover its face)
             } else {
                 self.glass.draw(ui.painter(), c, d, idle, sound.as_deref(), wave);
+            }
+            // The switch: a brass button on the dial that shows the next pair (with two or more).
+            if many && !self.picker {
+                let at = c + vec2(d * 0.30, -d * 0.20);
+                let r = (d * 0.045).max(11.0);
+                let hit = ui.interact(Rect::from_center_size(at, vec2(r * 2.4, r * 2.4)), ui.id().with("switch"), egui::Sense::click());
+                glass::draw_switch(ui.painter(), at, r, hit.hovered());
+                if hit.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.current = (self.current + 1) % self.inputs.routes.len();
+                    self.glass = glass::Glass::default();
+                    self.dirty = true;
+                }
             }
             if self.picker {
                 self.picker(ui, c, d);

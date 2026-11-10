@@ -299,6 +299,19 @@ pub fn draw_alert(p: &Painter, c: Pos2, d: f32, title: &str, line: &str) {
     p.galley(Pos2::new(c.x - l.size().x / 2.0, top + t.size().y + d * 0.02), l, TEXT);
 }
 
+/// The switch on the dial: a brass stud with two arrows, one each way (the next pair).
+pub fn draw_switch(p: &Painter, at: Pos2, r: f32, hot: bool) {
+    p.circle(at, r, if hot { BRASS_LIGHT } else { BRASS }, Stroke::new(1.5_f32, BRASS_SHADOW));
+    let (w, h, s) = (r * 0.55, r * 0.28, Stroke::new((r * 0.14).max(1.5), BRASS_SHADOW));
+    let (top, bot) = (at.y - h, at.y + h);
+    p.line_segment([Pos2::new(at.x - w, top), Pos2::new(at.x + w, top)], s); // → on top
+    p.line_segment([Pos2::new(at.x + w, top), Pos2::new(at.x + w - h, top - h * 0.9)], s);
+    p.line_segment([Pos2::new(at.x + w, top), Pos2::new(at.x + w - h, top + h * 0.9)], s);
+    p.line_segment([Pos2::new(at.x + w, bot), Pos2::new(at.x - w, bot)], s); // ← underneath
+    p.line_segment([Pos2::new(at.x - w, bot), Pos2::new(at.x - w + h, bot - h * 0.9)], s);
+    p.line_segment([Pos2::new(at.x - w, bot), Pos2::new(at.x - w + h, bot + h * 0.9)], s);
+}
+
 /// A spyglass's eyepiece: see-through dark glass, darker toward the edge (no dot of light at 11 o'clock: nothing on the glass),
 /// and a knurled brass rim lit from the top left (Synth Spyglass's lens()).
 fn lens(p: &Painter, c: Pos2, r: f32, d: f32) {

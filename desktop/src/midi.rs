@@ -44,8 +44,7 @@ pub struct Played {
     program: std::collections::HashMap<String, [Option<u8>; 16]>,
     last_channel: u8,
     last_source: Option<String>,
-    /// What the FM-1 says it's playing, and when it said it.
-    fm1: Option<(String, Instant)>,
+
     pub last_note: Option<u8>,
     last_velocity: u8,
     first_velocity: Option<u8>,
@@ -55,7 +54,7 @@ pub struct Played {
 
 impl Default for Played {
     fn default() -> Played {
-        Played { down: [false; 128], vel: [0; 128], program: Default::default(), last_channel: 0, last_source: None, fm1: None, last_note: None, last_velocity: 0, first_velocity: None, velocity_varies: false, note_ons: 0 }
+        Played { down: [false; 128], vel: [0; 128], program: Default::default(), last_channel: 0, last_source: None, last_note: None, last_velocity: 0, first_velocity: None, velocity_varies: false, note_ons: 0 }
     }
 }
 
@@ -84,11 +83,6 @@ impl Played {
             0xB0 if note == 123 || note == 120 => self.down = [false; 128],
             _ => {}
         }
-    }
-
-    /// The sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), while it keeps saying it.
-    pub fn fm1_sound(&self) -> Option<String> {
-        self.fm1.as_ref().filter(|(n, t)| !n.is_empty() && t.elapsed() < SOUND_STALE).map(|(n, _)| n.clone())
     }
 
     /// The sound the last note's channel picked on its input, if a Program Change said.
@@ -186,53 +180,42 @@ pub fn order(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
-/// FROM: what the spyglass shows, and what plays the TO synths.
-#[derive(Clone, PartialEq, Debug)]
-pub enum From {
-    /// The first keyboard (by `order`).
-    Auto,
-    All,
-    Named(String),
-}
-
-impl From {
-    pub fn key(&self) -> String {
-        match self {
-            From::Auto => String::new(),
-            From::All => "*".to_string(),
-            From::Named(n) => n.clone(),
-        }
-    }
-
-    pub fn from_key(k: Option<&str>) -> From {
-        match k {
-            None | Some("") => From::Auto,
-            Some("*") => From::All,
-            Some(n) => From::Named(n.to_string()),
-        }
-    }
-
-    /// Which of the inputs there are now it means.
-    pub fn picks(&self, now: &[String]) -> Vec<String> {
-        match self {
-            From::All => order(now.to_vec()),
-            From::Named(n) => now.iter().filter(|p| *p == n).cloned().collect(),
-            From::Auto => order(now.to_vec()).into_iter().next().into_iter().collect(),
-        }
-    }
-}
-
-/// The TO synths open now; everything played on FROM goes to each.
-type Outs = Arc<Mutex<Vec<(String, MidiOutputConnection)>>>;
-
-/// The open inputs (FROM, and any FM-1 for its sound's name) and the TO outputs.
-pub struct Inputs {
-    open: BTreeMap<String, MidiInputConnection<()>>,
-    /// Which inputs are open as FROM (the rest only for an FM-1's sound name).
-    from_open: Vec<String>,
-    pub from: From,
+/// A pair: a FROM (a keyboard; "" is the first keyboard) and the synths it plays (TO). Several run at once; the
+/// spyglass shows one at a time.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Route {
+    pub from: String,
     pub to: BTreeSet<String>,
+}
+
+impl Route {
+    /// The input it means among those there are now ("" is the first keyboard).
+    pub fn input(&self, now: &[String]) -> Option<String> {
+        if self.from.is_empty() {
+            order(now.to_vec()).into_iter().next()
+        } else {
+            now.iter().find(|n| **n == self.from).cloned()
+        }
+    }
+}
+
+/// The TO synths open now, by name, shared by every pair (an output is opened once: Windows allows no more).
+type Outs = Arc<Mutex<BTreeMap<String, MidiOutputConnection>>>;
+
+/// One open input: what's played on it, and where it goes (None: it's open only for an FM-1's sound name).
+struct Open {
+    _conn: MidiInputConnection<()>,
+    played: Arc<Mutex<Played>>,
+    targets: Arc<Mutex<Option<BTreeSet<String>>>>,
+}
+
+/// The pairs' inputs (and any FM-1, for its sound's name) and their outputs.
+pub struct Inputs {
+    open: BTreeMap<String, Open>,
+    pub routes: Vec<Route>,
     outs: Outs,
+    /// What an FM-1 says it's playing, and when.
+    fm1: Arc<Mutex<Option<(String, Instant)>>>,
     /// The FM-1 being said hello to, and when last.
     hello: Option<(String, MidiOutputConnection)>,
     hello_at: Option<Instant>,
@@ -240,37 +223,44 @@ pub struct Inputs {
 
 impl Default for Inputs {
     fn default() -> Inputs {
-        Inputs { open: BTreeMap::new(), from_open: vec![], from: From::Auto, to: BTreeSet::new(), outs: Arc::default(), hello: None, hello_at: None }
+        Inputs { open: BTreeMap::new(), routes: vec![Route::default()], outs: Arc::default(), fm1: Arc::default(), hello: None, hello_at: None }
     }
 }
 
 impl Inputs {
-    /// Opens what FROM and TO want now, closes what's gone or no longer wanted; `on_note` is called (from MIDI
+    /// Opens what the pairs want now and closes what's gone or no longer wanted; `on_note` is called (from MIDI
     /// threads) after each message.
-    pub fn refresh(&mut self, played: &Arc<Mutex<Played>>, on_note: &(impl Fn() + Clone + Send + 'static)) {
+    pub fn refresh(&mut self, on_note: &(impl Fn() + Clone + Send + 'static)) {
         let now = ports();
-        let from = self.from.picks(&now);
-        if from != self.from_open {
-            self.open.clear(); // (FROM changed: reopen, so each input is opened the right way)
-            self.from_open = from.clone();
+        // Each input's TO (a keyboard in two pairs plays both pairs' synths).
+        let mut wants: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for r in &self.routes {
+            if let Some(i) = r.input(&now) {
+                wants.entry(i).or_default().extend(r.to.iter().cloned());
+            }
         }
-        // FROM's inputs, and an FM-1's too for the name of its sound (not shown, not passed on, unless it's FROM).
-        let want: Vec<String> = now.iter().filter(|n| from.contains(n) || is_fm1(n)).cloned().collect();
-        self.open.retain(|name, _| want.contains(name));
-        for name in want {
-            if self.open.contains_key(&name) {
+        for n in now.iter().filter(|n| is_fm1(n)) {
+            wants.entry(n.clone()).or_default(); // (an FM-1 always, for its sound's name)
+        }
+        let shown: BTreeSet<String> = self.routes.iter().filter_map(|r| r.input(&now)).collect();
+        self.open.retain(|name, _| wants.contains_key(name));
+        for (name, to) in &wants {
+            let targets = shown.contains(name).then(|| to.clone());
+            if let Some(o) = self.open.get(name) {
+                *o.targets.lock().unwrap() = targets;
                 continue;
             }
-            let shown = from.contains(&name);
-            if let Some(c) = connect(&name, played.clone(), on_note.clone(), shown, self.outs.clone()) {
-                self.open.insert(name, c);
+            let (played, t) = (Arc::new(Mutex::new(Played::default())), Arc::new(Mutex::new(targets)));
+            if let Some(c) = connect(name, played.clone(), on_note.clone(), t.clone(), self.outs.clone(), self.fm1.clone()) {
+                self.open.insert(name.clone(), Open { _conn: c, played, targets: t });
             }
         }
-        // TO: open the ticked outputs there are, close the rest (all notes off on the way out).
+        // The outputs every pair's TO wants, open; the rest closed (all notes off on the way out).
         let outs = out_ports();
+        let all: BTreeSet<String> = self.routes.iter().flat_map(|r| r.to.iter().cloned()).filter(|n| outs.contains(n)).collect();
         let mut o = self.outs.lock().unwrap();
-        o.retain_mut(|(name, conn)| {
-            let keep = self.to.contains(name) && outs.contains(name);
+        o.retain(|name, conn| {
+            let keep = all.contains(name);
             if !keep {
                 for ch in 0..16u8 {
                     let _ = conn.send(&[0xB0 | ch, 123, 0]);
@@ -278,26 +268,37 @@ impl Inputs {
             }
             keep
         });
-        for name in &self.to {
-            if o.iter().any(|(n, _)| n == name) || !outs.contains(name) {
+        for name in all {
+            if o.contains_key(&name) {
                 continue;
             }
             let Ok(out) = MidiOutput::new(CLIENT) else { continue };
-            let Some(port) = out.ports().into_iter().find(|p| out.port_name(p).is_ok_and(|n| n == *name)) else { continue };
+            let Some(port) = out.ports().into_iter().find(|p| out.port_name(p).is_ok_and(|n| n == name)) else { continue };
             if let Ok(c) = out.connect(&port, "MIDI Spyglass to") {
-                o.push((name.clone(), c));
+                o.insert(name, c);
             }
         }
     }
 
-    /// The TO outputs open now.
-    pub fn playing_to(&self) -> Vec<String> {
-        self.outs.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+    /// The input a pair shows, while it's open.
+    pub fn input_of(&self, r: &Route) -> Option<String> {
+        r.input(&ports()).filter(|n| self.open.contains_key(n))
     }
 
-    /// The inputs shown (FROM), and the outputs played (TO), open now.
-    pub fn names(&self) -> Vec<String> {
-        self.from_open.iter().filter(|n| self.open.contains_key(*n)).cloned().collect()
+    /// What's been played on an input.
+    pub fn played(&self, input: &str) -> Option<Arc<Mutex<Played>>> {
+        self.open.get(input).map(|o| o.played.clone())
+    }
+
+    /// A pair's TO outputs that are open now.
+    pub fn playing_to(&self, r: &Route) -> Vec<String> {
+        let o = self.outs.lock().unwrap();
+        r.to.iter().filter(|n| o.contains_key(*n)).cloned().collect()
+    }
+
+    /// The sound an FM-1 says it's playing, while it keeps saying it.
+    pub fn fm1_sound(&self) -> Option<String> {
+        self.fm1.lock().unwrap().as_ref().filter(|(n, t)| !n.is_empty() && t.elapsed() < SOUND_STALE).map(|(n, _)| n.clone())
     }
 
     /// Says hello to an FM-1 (one listened to), so its Big Screen firmware says the sound playing. Call often.
@@ -339,7 +340,14 @@ fn pass_on(bytes: &[u8], to_fm1: bool) -> Option<Vec<u8>> {
     }
 }
 
-fn connect(name: &str, played: Arc<Mutex<Played>>, on_note: impl Fn() + Send + 'static, shown: bool, outs: Outs) -> Option<MidiInputConnection<()>> {
+fn connect(
+    name: &str,
+    played: Arc<Mutex<Played>>,
+    on_note: impl Fn() + Send + 'static,
+    targets: Arc<Mutex<Option<BTreeSet<String>>>>,
+    outs: Outs,
+    fm1: Arc<Mutex<Option<(String, Instant)>>>,
+) -> Option<MidiInputConnection<()>> {
     let mut input = MidiInput::new(CLIENT).ok()?;
     input.ignore(if is_fm1(name) { Ignore::TimeAndActiveSense } else { Ignore::All }); // an FM-1's SysEx: its sound's name
     let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n == name))?;
@@ -349,22 +357,20 @@ fn connect(name: &str, played: Arc<Mutex<Played>>, on_note: impl Fn() + Send + '
         .connect(&port, "MIDI Spyglass in", move |_, bytes, _| {
             if bytes.first() == Some(&0xf0) {
                 if let Some(name) = fm1_sound(bytes) {
-                    played.lock().unwrap().fm1 = Some((name, Instant::now()));
+                    *fm1.lock().unwrap() = Some((name, Instant::now()));
                     on_note();
                 }
                 return; // (its screen rows too: nothing for the spyglass)
             }
-            if !shown {
-                return;
-            }
-            for (to, out) in outs.lock().unwrap().iter_mut() {
-                if *to != me {
-                    // (never back to the port it came from: no loop)
-                    if let Some(m) = pass_on(bytes, is_fm1(to)) {
-                        let _ = out.send(&m);
-                    }
+            let Some(to) = targets.lock().unwrap().clone() else { return };
+            let mut o = outs.lock().unwrap();
+            for name in to.iter().filter(|n| **n != me) {
+                // (never back to the port it came from: no loop)
+                if let (Some(out), Some(m)) = (o.get_mut(name), pass_on(bytes, is_fm1(name))) {
+                    let _ = out.send(&m);
                 }
             }
+            drop(o);
             parser.feed(bytes, &mut played.lock().unwrap());
             on_note();
         }, ())
@@ -390,12 +396,12 @@ mod tests {
     }
 
     #[test]
-    fn from_picks_and_passes_on() {
+    fn pairs_pick_their_input_and_pass_on() {
         let now = ["IAC Driver Bus 1", "Felucca", "Keystation 49 MK3 (Transport)", "Keystation 49 MK3 (USB MIDI)", "AIR 192 6"].map(String::from);
-        assert_eq!(From::Auto.picks(&now), vec!["Keystation 49 MK3 (USB MIDI)".to_string()]);
-        assert_eq!(From::All.picks(&now).len(), 5);
-        assert_eq!(From::Named("Felucca".into()).picks(&now), vec!["Felucca".to_string()]);
-        assert_eq!(From::from_key(Some(&From::All.key())), From::All);
+        assert_eq!(Route::default().input(&now).as_deref(), Some("Keystation 49 MK3 (USB MIDI)"), "\"\": the first keyboard");
+        let r = Route { from: "Felucca".into(), to: BTreeSet::new() };
+        assert_eq!(r.input(&now).as_deref(), Some("Felucca"));
+        assert_eq!(Route { from: "Gone".into(), to: BTreeSet::new() }.input(&now), None);
         assert_eq!(pass_on(&[0x9C, 60, 100], true), Some(vec![0x90, 60, 100]), "to an FM-1: channel 1");
         assert_eq!(pass_on(&[0x9C, 60, 100], false), Some(vec![0x9C, 60, 100]));
         assert_eq!(pass_on(&[0xF8], false), None);
