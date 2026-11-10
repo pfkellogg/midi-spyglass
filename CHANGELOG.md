@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased (2026-11-10)
+
+- **The pitch to one decimal** ("C4 261.6 Hz").
+- **Devices are looked for every second** (was every two), so a keyboard or synth plugged in shows at once; nothing
+  waits on another device being there.
+- **Android, on a TV** (Fire TV Stick 4K, Android 7.1): runs there, with a TV banner. With the remote, OK on the glass
+  opens the MIDI connections and ◀ ▶ shows the next pair; on a touch screen, tap for the connections, long-press for
+  the grip.
+- **Android:** an FM-1's MIDI in is opened only when it's ticked under TO, so FM-1 Mirror + Spyglass can have it.
+- On a Fire TV, [FM-1 Mirror + Spyglass](https://github.com/pfkellogg/fm1-mirror-spyglass-android) 1.5 has this
+  spyglass and its pairs built in, plus a built-in piano.
+
 ## 1.2.0 (2026-11-10)
 
 - **Pairs**: several keyboards (FROM), each with the synths it plays (TO), all at once. The spyglass shows one pair

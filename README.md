@@ -31,7 +31,7 @@ Mac, Windows, Linux and Android: see [Releases](../../releases).
 | **Mac** | `MIDI-Spyglass-mac.zip`: unzip, drag *MIDI Spyglass* to Applications. The first time, right-click it and choose Open. |
 | **Windows** | `MIDI-Spyglass-windows.exe`: run it (Windows may ask you to confirm an app from the internet). |
 | **Linux** | `MIDI-Spyglass-linux`: `chmod +x` it and run it (needs ALSA). |
-| **Android** | `MIDI-Spyglass-android.apk`: install it (Android 11 or newer, with MIDI). |
+| **Android** | `MIDI-Spyglass-android.apk`: install it (Android 7.1 or newer, with MIDI: also a Fire TV Stick 4K, where the remote's OK opens the connections and ◀ ▶ the next pair). |
 
 ## Using it
 
