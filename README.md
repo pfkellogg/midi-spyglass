@@ -20,6 +20,8 @@ firmware say the name of its sound.
 
 ![MIDI Spyglass showing C major](docs/spyglass.png)
 
+**Video:** [MIDI Spyglass: See Every Note & Chord You Play](https://youtu.be/GMLf3W4oTp4) (80 seconds).
+
 ## Download
 
 Mac, Windows, Linux and Android: see [Releases](../../releases).
@@ -44,6 +46,11 @@ FROM and TO:
 - **Soft synths** (Mac): Analog Lab V and the other Arturia apps, Splice INSTRUMENT, Pianoteq… are listed under TO by
   name. A soft synth plays what comes down the bus it listens to (IAC Driver Bus 1), so ticking it ticks that bus and
   opens the app.
+
+<p>
+<img src="docs/menu.png" width="320" alt="The MIDI connections filling the glass: keyboards (FROM), each with its synths (TO)">
+<img src="docs/pairs.png" width="320" alt="A pair on show, with the switch on the dial">
+</p>
 
 **Mac, Windows, Linux:** drag the spyglass to move it; resize it with the brass grip on its rim (bottom right), or
 scroll over it. **Right-click** it for *Sound name*, *Waveform*, *Waveform from*, *Always on top*, and *Quit*.
@@ -70,12 +77,56 @@ MIDI carries notes, not sound. So:
   louder. On a Mac, allow the microphone once (any audio input counts as one), and recording other apps' audio for
   the soft synths. Otherwise it's drawn from the notes: a sine at each held note's pitch and loudness, added up.
 
+## Permissions (Mac)
+
+macOS asks once for each, the first time it's needed:
+- **Microphone**, for the FM-1's sound (or another audio input) under the waveform: any audio input counts as a
+  microphone. Without it, the waveform is drawn from the notes.
+- **Record other apps' audio**, for a soft synth's real waveform (macOS 14.2 or later). It listens only to the synth
+  apps, so a video playing beside them isn't mixed in.
+
+Both are in System Settings › Privacy & Security if you change your mind.
+
+## Troubleshooting
+
+- **No MIDI found**: plug in a keyboard, or click the glass and tick one. A Bluetooth MIDI keyboard has to be
+  connected first (Mac: Audio MIDI Setup › Bluetooth; Android: its Bluetooth settings).
+- **A synth under TO doesn't play**: make sure no other app sends it the same keyboard too (notes would play twice),
+  and on Android that no other app has it open (one app at a time can send to a device).
+- **Analog Lab doesn't play**: it has to listen to the bus ticked under TO (IAC Driver Bus 1): in Analog Lab, Audio
+  MIDI Settings › MIDI Devices. If several Arturia apps listen to that bus and are open, they all play: quit the
+  others.
+- **The waveform is a perfect sine**: it's drawn from the notes, because the spyglass can't hear the synth (macOS hasn't
+  been allowed to give it the microphone or other apps' audio yet, or the synth plays elsewhere).
+
+## How it works
+
+| | |
+| --- | --- |
+| `desktop/src/main.rs` | The window (one round, borderless, always-on-top viewport), the menus, the pairs, the header |
+| `desktop/src/midi.rs` | The inputs and outputs, the pairs (FROM → TO) and what's passed on, Program Change names, the FM-1 hello |
+| `desktop/src/glass.rs`, `staff.rs`, `chord.rs` | The eyepiece, the grand staff, chord and interval names (from FM-1 Mirror) |
+| `desktop/src/scope.rs` | The real sound: an audio input on a thread of its own, and the `synth-tap` helper's stream |
+| `desktop/src/softsynth.rs` | The soft synths on a Mac and the MIDI input each listens to, read from their own settings |
+| `desktop/helper/synth-tap.swift` | A Core Audio process tap on just the synth apps (from Synth Spyglass) |
+| `android/` | The same for Android: `Inputs.java` (pairs), `Glass.java` (the eyepiece), `Scope.java` (the FM-1's sound) |
+
+The FM-1's sound name comes from its Big Screen firmware: MIDI Spyglass sends `F0 7D 'F' 'S' 00 F7` about once a
+second, and the firmware answers with `F0 7D 'F' 'S' 02`, then the name in ASCII.
+
 ## Building
 
-- Desktop (Rust): `cd desktop && cargo run --release`. On a Mac, `./make_app.sh` builds *MIDI Spyglass.app*
-  (Apple silicon and Intel) and installs it in /Applications. Linux needs `libasound2-dev`.
+- Desktop (Rust): `cd desktop && cargo test && cargo run --release`. On a Mac, `./make_app.sh` builds
+  *MIDI Spyglass.app* (Apple silicon and Intel, with the `synth-tap` helper; needs Xcode's command line tools) and
+  installs it in /Applications. Linux needs `libasound2-dev`.
+- Releases: a `v*` tag makes GitHub Actions build the Mac, Windows and Linux downloads and publish a release
+  (`.github/workflows/build.yml`); the Android APK is signed locally and added to it.
 - Android: `cd android && ./gradlew assembleRelease` (JDK 17).
 - `tools/make_icon.py` draws the icon (Pillow).
+
+## Versions
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
