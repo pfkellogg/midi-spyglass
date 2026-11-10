@@ -290,6 +290,11 @@ impl Inputs {
         }
     }
 
+    /// The TO outputs open now.
+    pub fn playing_to(&self) -> Vec<String> {
+        self.outs.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+    }
+
     /// The inputs shown (FROM), and the outputs played (TO), open now.
     pub fn names(&self) -> Vec<String> {
         self.from_open.iter().filter(|n| self.open.contains_key(*n)).cloned().collect()

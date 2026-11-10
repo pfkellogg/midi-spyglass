@@ -140,10 +140,20 @@ impl App {
             return None;
         }
         let ring = self.ring.lock().unwrap();
-        if self.listener().is_some() && ring.listening() {
+        // The heard sound is the FM-1's (or the input chosen): it's the right wave only while that's what plays.
+        let (fm1, soft) = self.playing();
+        if self.listener().is_some() && ring.listening() && (fm1 || soft.is_empty()) {
             return Some(self.glass.hz().and_then(|hz| ring.wave(hz)));
         }
         Some(self.glass.drawn_wave())
+    }
+
+    /// What TO plays now: an FM-1 (ticked and open), and the soft synths open on a ticked bus.
+    fn playing(&self) -> (bool, Vec<String>) {
+        let open = self.inputs.playing_to();
+        let fm1 = open.iter().any(|n| midi::is_fm1(n));
+        let soft = self.synths.iter().filter(|s| open.iter().any(|b| s.plays(b))).map(|s| s.name.clone()).collect();
+        (fm1, soft)
     }
 
     /// The right-click menu: the inputs (untick one to stop listening to it), always on top, quit.
@@ -326,7 +336,19 @@ impl eframe::App for App {
         // The header: the sound the FM-1 says it's playing ("T1 FM6 PIANO 1"), else whose sound is heard ("FM-1",
         // from its USB audio), else a Program Change's sound name.
         let heard = self.listener().filter(|_| self.ring.lock().unwrap().listening()).map(|n| scope::label(&n));
-        let sound = if self.sound { said.or(heard).or(sound) } else { None };
+        // The header follows TO: the FM-1's sound while it plays, the soft synths' names ("Analog Lab V"), both
+        // when they're layered; with nothing ticked, the FM-1's or a Program Change's.
+        let (fm1, soft) = self.playing();
+        let fm1_sound = said.or(heard);
+        let sound = if !self.sound {
+            None
+        } else if fm1 || !soft.is_empty() {
+            let mut parts: Vec<String> = if fm1 { fm1_sound.into_iter().collect() } else { vec![] };
+            parts.extend(soft);
+            (!parts.is_empty()).then(|| parts.join(" + "))
+        } else {
+            fm1_sound.or(sound)
+        };
         // Settling a chord or emptying the glass needs another look soon; otherwise a new message wakes it.
         ctx.request_repaint_after(if self.glass.busy() || changed { Duration::from_millis(40) } else { Duration::from_millis(900) });
         let (at, scroll) = ctx.input(|i| (i.viewport().outer_rect.map(|r| r.min), i.smooth_scroll_delta.y));
