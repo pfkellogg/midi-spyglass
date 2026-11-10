@@ -214,7 +214,7 @@ impl Glass {
         let (name, detail, keys, vel) = match &self.shown {
             None => (String::new(), idle.to_string(), vec![], None),
             Some(Shown::Note(n, vel)) => {
-                let mut detail = format!("{}   {:.0} Hz", note_name(*n), note_hz(*n));
+                let mut detail = format!("{}   {:.1} Hz", note_name(*n), note_hz(*n));
                 if let Some(v) = vel {
                     detail += &format!("   vel {v}");
                 }

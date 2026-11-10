@@ -26,8 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * The MIDI devices, in pairs as in the desktop app (and Synth Spyglass): a keyboard (FROM) and the synths it plays
  * (TO). Several pairs play at once; the spyglass shows one at a time. Every device that sends MIDI is opened to
  * listen (its own Played), so a pair's keyboard is shown as soon as it's picked; a device's MIDI in is opened only
- * when it's a TO (Android lets one app at a time have it), and an FM-1's for the hello, about once a second, that
- * makes its Big Screen firmware say the sound playing ("T1 FM6 PIANO 1"). Devices that come and go are picked up as
+ * when it's a TO (Android lets one app at a time have it); an FM-1 ticked under TO also gets the hello, about once a
+ * second, that makes its Big Screen firmware say the sound playing ("T1 FM6 PIANO 1"). Devices that come and go are picked up as
  * they do.
  */
 final class Inputs {
@@ -265,7 +265,9 @@ final class Inputs {
         for (Dev d : open.values()) {
             Set<String> t = wants.get(d.name);
             d.targets = t == null ? null : Collections.unmodifiableSet(new TreeSet<>(t));
-            boolean need = d.info.getInputPortCount() > 0 && (allTo.contains(d.name) || isFm1(d.name));
+            // Only a TO's MIDI in: Android lets one app at a time send to a device, and FM-1 Mirror needs the FM-1's for its
+            // screen. (Its hellos make the FM-1 say its sound to every app listening, so the name still comes.)
+            boolean need = d.info.getInputPortCount() > 0 && allTo.contains(d.name);
             if (need && d.in == null) d.in = d.device.openInputPort(0);
             else if (!need) d.closeIn();
             if (d.in != null && allTo.contains(d.name)) sinks.put(d.name, d.in);
