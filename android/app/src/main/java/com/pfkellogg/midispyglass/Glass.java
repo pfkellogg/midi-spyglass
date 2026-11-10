@@ -25,10 +25,10 @@ import java.util.Arrays;
 import java.util.Locale;
 
 /**
- * The spyglass (from FM-1 Mirror + Spyglass, after Synth Spyglass for Android): the last note or chord
- * played on any MIDI input in a round brass eyepiece, with the notes on a staff, their waveform (live: it moves while
- * keys are held, as tall as they were hit, and fades when they come up), and how hard the key was hit. Drag it to move it; pinch it, or tap it and drag the grip on its rim, to resize it; tap it
- * and ≡ for the MIDI inputs. Where it is and its size are remembered.
+ * The spyglass (from FM-1 Mirror + Spyglass, after Synth Spyglass for Android): the last note or chord played in a
+ * round brass eyepiece, with the notes on a staff, their waveform, and how hard the key was hit. Tap it (on a TV:
+ * OK) for the MIDI connections; drag it to move it; pinch it, or long-press it and drag the grip on its rim, to
+ * resize it. Where it is and its size are remembered.
  */
 final class Glass extends FrameLayout {
     private static final int BRASS = Color.rgb(0xc9, 0x9a, 0x45);
@@ -237,6 +237,7 @@ final class Glass extends FrameLayout {
     private final View.OnTouchListener move = new View.OnTouchListener() {
         private float lastX, lastY, downX, downY;
         private boolean dragged;
+        private long downAt;
 
         @Override
         public boolean onTouch(View v, MotionEvent e) {
@@ -259,6 +260,7 @@ final class Glass extends FrameLayout {
                     downX = lastX = e.getRawX();
                     downY = lastY = e.getRawY();
                     dragged = false;
+                    downAt = e.getEventTime();
                     break;
                 case MotionEvent.ACTION_MOVE:
                     int slop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
@@ -268,7 +270,10 @@ final class Glass extends FrameLayout {
                     lastY = e.getRawY();
                     break;
                 case MotionEvent.ACTION_UP:
-                    if (!dragged) toggleHandles();
+                    // A tap: the MIDI connections (as clicking the glass in MIDI Spyglass on a computer); a long
+                    // press: the grip, to resize it.
+                    if (!dragged && e.getEventTime() - downAt >= ViewConfiguration.getLongPressTimeout()) toggleHandles();
+                    else if (!dragged) onMenu.run();
                     save();
                     break;
             }
@@ -415,6 +420,24 @@ final class Glass extends FrameLayout {
             showNothing();
         }
         invalidate();
+    }
+
+    /** The remote (a TV): OK opens the MIDI connections; ◀ ▶ show the other pairs. */
+    @Override
+    public boolean onKeyDown(int code, android.view.KeyEvent e) {
+        switch (code) {
+            case android.view.KeyEvent.KEYCODE_DPAD_CENTER:
+            case android.view.KeyEvent.KEYCODE_ENTER:
+            case android.view.KeyEvent.KEYCODE_NUMPAD_ENTER:
+                onMenu.run();
+                return true;
+            case android.view.KeyEvent.KEYCODE_DPAD_LEFT:
+            case android.view.KeyEvent.KEYCODE_DPAD_RIGHT:
+                onSwitch.run();
+                return true;
+            default:
+                return super.onKeyDown(code, e);
+        }
     }
 
     boolean wave() { return wave; }

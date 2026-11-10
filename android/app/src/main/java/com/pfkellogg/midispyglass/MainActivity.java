@@ -43,13 +43,22 @@ public final class MainActivity extends Activity {
         FrameLayout stage = new FrameLayout(this);
         stage.setBackgroundColor(Color.rgb(8, 10, 13));
         setContentView(stage);
-        WindowInsetsController c = getWindow().getInsetsController();
-        if (c != null) {
-            c.hide(WindowInsets.Type.systemBars());
-            c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.hide(WindowInsets.Type.systemBars());
+                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            // (Android 10 and older, e.g. a Fire TV Stick on Fire OS 6: the older flags)
+            stage.setSystemUiVisibility(android.view.View.SYSTEM_UI_FLAG_FULLSCREEN | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         }
         glass = new Glass(this, prefs, this::chooseInputs, this::nextPair, () -> inputs == null ? null : inputs.fm1Sound());
         stage.addView(glass);
+        // The remote (a TV): the glass takes focus; OK opens the MIDI connections, ◀ ▶ the other pairs.
+        glass.setFocusable(true);
+        glass.requestFocus();
         stage.post(() -> glass.place(stage.getWidth(), stage.getHeight()));
         MidiManager mm = getSystemService(MidiManager.class);
         if (mm == null) {
