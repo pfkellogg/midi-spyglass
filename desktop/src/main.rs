@@ -60,6 +60,9 @@ struct App {
     /// The soft synths on this Mac, and when they were last looked at.
     synths: Vec<softsynth::SoftSynth>,
     synths_at: Instant,
+    /// The soft synths' sound, while one is ticked under TO; when it was last started.
+    tap: Option<scope::SynthTap>,
+    tap_at: Option<Instant>,
     ring: Arc<Mutex<scope::Ring>>,
     dirty: bool,
     saved_at: Instant,
@@ -88,6 +91,8 @@ impl App {
             picker: std::env::var_os("MIDI_SPYGLASS_PICKER").is_some(), // (open at start: for screenshots)
             synths: softsynth::installed(),
             synths_at: Instant::now(),
+            tap: None,
+            tap_at: None,
             ring,
             dirty: false,
             saved_at: Instant::now(),
@@ -121,6 +126,15 @@ impl App {
             softsynth::refresh(&mut self.synths); // (opened, quit, or set to another input since)
             self.synths_at = Instant::now();
         }
+        // The soft synths' sound, while one plays: the helper runs only then (started again at most every 5 s).
+        let soft = self.wave && !self.playing().1.is_empty();
+        if !soft || self.tap.as_ref().is_some_and(|t| t.dead()) {
+            self.tap = None;
+        }
+        if soft && self.tap.is_none() && self.tap_at.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+            self.tap_at = Some(Instant::now());
+            self.tap = scope::SynthTap::start();
+        }
         self.listen();
     }
 
@@ -139,11 +153,21 @@ impl App {
         if !self.wave {
             return None;
         }
-        let ring = self.ring.lock().unwrap();
-        // The heard sound is the FM-1's (or the input chosen): it's the right wave only while that's what plays.
+        // The real sound: the FM-1's (or the input chosen) while that's what plays, the soft synths' from the helper;
+        // layered, whichever is louder now. Else drawn from the notes.
         let (fm1, soft) = self.playing();
-        if self.listener().is_some() && ring.listening() && (fm1 || soft.is_empty()) {
-            return Some(self.glass.hz().and_then(|hz| ring.wave(hz)));
+        let ring = self.ring.lock().unwrap();
+        let heard = self.listener().is_some() && ring.listening() && (fm1 || soft.is_empty());
+        let tapped = self.tap.as_ref().map(|t| t.ring.lock().unwrap()).filter(|r| r.listening() && !soft.is_empty());
+        if heard || tapped.is_some() {
+            let Some(hz) = self.glass.hz() else { return Some(None) };
+            let a = if heard { ring.wave_and_peak(hz) } else { None };
+            let b = tapped.as_ref().and_then(|r| r.wave_and_peak(hz));
+            let louder = match (a, b) {
+                (Some(a), Some(b)) => Some(if a.0 >= b.0 { a.1 } else { b.1 }),
+                (a, b) => a.or(b).map(|x| x.1),
+            };
+            return Some(louder);
         }
         Some(self.glass.drawn_wave())
     }
@@ -357,7 +381,7 @@ impl eframe::App for App {
             self.dirty = true;
         }
         let wave = self.wave_now();
-        if self.listener().is_some() && self.glass.hz().is_some() {
+        if (self.listener().is_some() || self.tap.is_some()) && self.glass.hz().is_some() {
             ctx.request_repaint_after(Duration::from_millis(40)); // the real sound keeps moving
         }
         let no_midi = self.inputs.names().is_empty();

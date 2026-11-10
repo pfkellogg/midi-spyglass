@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// An FM-1's USB audio has one of these in its name: picked by itself.
@@ -69,6 +72,15 @@ impl Ring {
         }
         w.iter_mut().for_each(|s| *s /= peak);
         Some(w)
+    }
+
+    /// `wave`, with how loud it really was: layered, the spyglass shows whichever synth is louder.
+    pub fn wave_and_peak(&self, hz: f64) -> Option<(f32, Vec<f32>)> {
+        let w = self.wave(hz)?;
+        let span = w.len();
+        let start = KEEP - span;
+        let peak = (start..KEEP).fold(0.0f32, |m, i| m.max(self.at(i).abs()));
+        Some((peak, w))
     }
 }
 
@@ -211,5 +223,74 @@ mod tests {
     #[test]
     fn finds_the_fm1_by_its_name() {
         assert!(is_fm1("Melodee FM-1") && is_fm1("USB-Audio") && !is_fm1("AIR 192 6") && !is_fm1("HD Webcam eMeet C960"));
+    }
+}
+
+/// The soft synths' sound (Analog Lab V, CS-80 V…), from Synth Spyglass's helper `synth-tap` (helper/synth-tap.swift),
+/// which sits next to the app's executable (Mac, macOS 14.2+). A Core Audio process tap listens to just those apps,
+/// not a video playing beside them. The first time, macOS asks whether the app may record other apps' audio.
+/// Its stdout: chunks of [u32 rate][u32 count][count × f32 mono], little-endian; rate 0: [count bytes], the names of
+/// the apps it's listening to. Dropping it stops the helper.
+pub struct SynthTap {
+    pub ring: Arc<Mutex<Ring>>,
+    child: Child,
+    dead: Arc<AtomicBool>,
+}
+
+impl SynthTap {
+    /// None when there's no helper (not a Mac build) or it can't run (an older macOS).
+    pub fn start() -> Option<SynthTap> {
+        let helper = std::env::current_exe().ok()?.with_file_name("synth-tap");
+        if !helper.is_file() {
+            return None;
+        }
+        let mut child = Command::new(&helper).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        let mut out = child.stdout.take()?;
+        let ring = Arc::new(Mutex::new(Ring::default()));
+        let dead = Arc::new(AtomicBool::new(false));
+        let (r, gone) = (ring.clone(), dead.clone());
+        std::thread::Builder::new()
+            .name("MIDI Spyglass synth-tap".into())
+            .spawn(move || {
+                let (mut head, mut body) = ([0u8; 8], Vec::new());
+                while out.read_exact(&mut head).is_ok() {
+                    let rate = u32::from_le_bytes(head[..4].try_into().unwrap());
+                    let count = u32::from_le_bytes(head[4..].try_into().unwrap()) as usize;
+                    if rate == 0 {
+                        body.resize(count.min(4096), 0); // (the apps' names: the header says them already)
+                        if out.read_exact(&mut body).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    body.resize(count * 4, 0);
+                    if count > KEEP || out.read_exact(&mut body).is_err() {
+                        break;
+                    }
+                    if let Ok(mut ring) = r.lock() {
+                        ring.rate = rate as f32;
+                        for b in body.chunks_exact(4) {
+                            ring.push(f32::from_le_bytes(b.try_into().unwrap()));
+                        }
+                        if count > 0 {
+                            ring.last = Some(Instant::now());
+                        }
+                    }
+                }
+                gone.store(true, Ordering::Relaxed); // the helper ended: start it again later
+            })
+            .ok()?;
+        Some(SynthTap { ring, child, dead })
+    }
+
+    pub fn dead(&self) -> bool {
+        self.dead.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for SynthTap {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

@@ -13,6 +13,11 @@ APP="dist/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp icon/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"   # (tools/make_icon.py draws it)
+# synth-tap: the soft synths' sound for the waveform (helper/synth-tap.swift, from Synth Spyglass; macOS 14.2+)
+mkdir -p target/helper
+swiftc -O -target arm64-apple-macos14.2 helper/synth-tap.swift -o target/helper/synth-tap-arm64
+swiftc -O -target x86_64-apple-macos14.2 helper/synth-tap.swift -o target/helper/synth-tap-x86_64
+lipo -create -output "$APP/Contents/MacOS/synth-tap" target/helper/synth-tap-arm64 target/helper/synth-tap-x86_64
 lipo -create -output "$APP/Contents/MacOS/midi-spyglass" \
     target/aarch64-apple-darwin/release/midi-spyglass target/x86_64-apple-darwin/release/midi-spyglass
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -30,6 +35,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VER</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAudioCaptureUsageDescription</key><string>The waveform shows your soft synths' real sound (Analog Lab V, CS-80 V and the like). MIDI Spyglass listens only to those apps, and only draws it.</string>
   <key>NSMicrophoneUsageDescription</key><string>The waveform shows your synth's real sound from an audio input (the FM-1's own USB audio when it is plugged in). MIDI Spyglass only draws it; nothing is recorded or sent.</string>
 </dict>
 </plist>
